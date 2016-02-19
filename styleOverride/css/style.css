@@ -1,0 +1,38 @@
+* {
+	margin: 0;
+	padding: 0;
+	font-family: Consolas, Helvetica, Arial;
+}
+
+body {
+	width: 420px;
+	margin: 0 auto;
+}
+
+#selectors {
+	margin-top: calc(50vh - 50px);
+	height: 100px;
+	height: auto;
+}
+
+#selectors .selector {
+	margin: 9px;
+	height: 80px;
+	width: 120px;
+	float: left;
+	text-align: center;
+	color: white;
+	border: 1px solid white;
+}
+
+.selector[data="1"] {
+	background-color: #223;
+}
+
+.selector[data="2"] {
+	background-color: #232;
+}
+
+.selector[data="3"] {
+	background-color: #322;
+}
