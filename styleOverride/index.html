@@ -25,11 +25,14 @@
 				element.setAttribute("href", "css/style_" + data + ".css");
 
 				// don't use elem.replace() as this causes flashing of the background
-				body.appendChild(element);
-				if (lastCssLink != undefined) {
-					body.removeChild(lastCssLink)
+				// instead add stylesheet and remove the other one on load
+				element.onload = function() {
+					if (lastCssLink != undefined) {
+						body.removeChild(lastCssLink)
+					}
+					lastCssLink = element;
 				}
-				lastCssLink = element;
+				body.appendChild(element);
 			}
 		}
 	</script>
