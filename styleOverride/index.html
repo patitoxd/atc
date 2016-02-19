@@ -6,13 +6,17 @@
 	<link rel="stylesheet" type="text/css" href="css/style.css">
 </head>
 <body>
+	<div id="background"></div>
 	<div id="selectors">
 		<div class="selector" data="1">1</div>
 		<div class="selector" data="2">2</div>
 		<div class="selector" data="3">3</div>
+		<input id="visibility" type="range" name="visibility" min="0" max="100" value="100">
 	</div>
 	<script type="text/javascript">
 		var selectors = document.getElementsByClassName("selector"),
+			slider = document.getElementById("visibility"),
+			background = document.getElementById("background"),
 			body = document.getElementsByTagName("body")[0],
 			lastCssLink = undefined;
 		for (var selector in selectors) {
@@ -31,10 +35,15 @@
 						body.removeChild(lastCssLink)
 					}
 					lastCssLink = element;
-				}
+				};
 				body.appendChild(element);
-			}
+			};
 		}
+		var changevisibility = function() {
+			background.style.opacity = (this.value / 100);
+		};
+		slider.oninput = changevisibility;
+		slider.onchange = changevisibility;
 	</script>
 </body>
 </html>
