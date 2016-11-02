@@ -5,7 +5,7 @@
     "number": 2,
     "type": "T"
   },
-  "weightclass": "L",
+  "weightclass": "M",
   "category": {
     "srs": 3,
     "lahso": 6,
@@ -13,8 +13,8 @@
   },
   "ceiling": 27000,
   "rate": {
-    "climb":      2200,
-    "descent":    1500,
+    "climb":      2600,
+    "descent":    2600,
     "accelerate": 10,
     "decelerate": 6
   },
@@ -24,9 +24,11 @@
   },
   "speed":{
     "min":     100,
-    "max":     400,
     "landing": 130,
-    "cruise":  360
+    "cruise":  340,
+    "cruiseM": null,
+    "max":     360,
+    "maxM":    null
   },
   "capability": {
     "ils": true,

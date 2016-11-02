@@ -19,6 +19,7 @@ function canvas_init_pre() {
 
   prop.canvas.last = time();
   prop.canvas.dirty = true;
+  prop.canvas.draw_labels = true;
   prop.canvas.draw_restricted = true;
   prop.canvas.draw_sids = true;
   prop.canvas.draw_terrain = true;
@@ -26,10 +27,7 @@ function canvas_init_pre() {
 
 function canvas_init() {
   "use strict";
-  canvas_add("compass");
   canvas_add("navaids");
-  canvas_add("info");
-  canvas_add("aircraft");
 }
 
 function canvas_adjust_hidpi() {
@@ -107,47 +105,26 @@ function canvas_draw_runway(cc, runway, mode) {
   var length2 = round(km_to_px(runway.length / 2));
   var angle   = runway.angle;
 
-  cc.translate(round(km_to_px(runway.position[0])) + prop.canvas.panX, -round(km_to_px(runway.position[1])) + prop.canvas.panY);
+  cc.translate(round(km_to_px(runway.position[0])) + prop.canvas.panX, 
+              -round(km_to_px(runway.position[1])) + prop.canvas.panY);
   cc.rotate(angle);
 
-  if(!mode) {
+  if(!mode) { // runway body
     cc.strokeStyle = "#899";
     cc.lineWidth = 2.8;
     cc.beginPath();
-    cc.moveTo(0, -length2);
-    cc.lineTo(0,  length2);
+    cc.moveTo(0, 0);
+    cc.lineTo(0, -2*length2);
     cc.stroke();
-  } else {
+  } 
+  else {  // extended centerlines
+    if(!runway.ils.enabled) return;
     cc.strokeStyle = "#465";
-
-    var ils = null;
-
-    if(runway.ils[1] && runway.ils_distance[1]) {
-      ils = runway.ils_distance[1];
-      cc.lineWidth = 3;
-    } else {
-      ils = 40;
-      cc.lineWidth = 0.8;
-    }
-
+    cc.lineWidth = 1;
     cc.beginPath();
-    cc.moveTo(0, -length2);
-    cc.lineTo(0, -length2 - km_to_px(ils));
+    cc.moveTo(0, 0);
+    cc.lineTo(0, km_to_px(runway.ils.loc_maxDist));
     cc.stroke();
-
-    if(runway.ils[0] && runway.ils_distance[0]) {
-      ils = runway.ils_distance[0];
-      cc.lineWidth = 3;
-    } else {
-      ils = 40;
-      cc.lineWidth = 0.8;
-    }
-
-    cc.beginPath();
-    cc.moveTo(0,  length2);
-    cc.lineTo(0,  length2 + km_to_px(ils));
-    cc.stroke();
-
   }
 }
 
@@ -167,44 +144,47 @@ function canvas_draw_runway_label(cc, runway) {
   cc.save();
   cc.translate(0,  length2 + text_height);
   cc.rotate(-angle);
-  cc.translate(round(km_to_px(runway.name_offset[0][0])), -round(km_to_px(runway.name_offset[0][1])));
-  cc.fillText(runway.name[0], 0, 0);
-  cc.restore();
-
-  cc.save();
-  cc.translate(0, -length2 - text_height);
-  cc.rotate(-angle);
-  cc.translate(round(km_to_px(runway.name_offset[1][0])), -round(km_to_px(runway.name_offset[1][1])));
-  cc.fillText(runway.name[1], 0, 0);
+  cc.translate(round(km_to_px(runway.labelPos[0])), -round(km_to_px(runway.labelPos[1])));
+  cc.fillText(runway.name, 0, 0);
   cc.restore();
 }
 
 function canvas_draw_runways(cc) {
   "use strict";
+  if(!prop.canvas.draw_labels) return;
   cc.strokeStyle = "rgba(255, 255, 255, 0.4)";
   cc.fillStyle   = "rgba(255, 255, 255, 0.4)";
   cc.lineWidth   = 4;
   var airport=airport_get();
   var i;
+  //Extended Centerlines
   for( i=0;i<airport.runways.length;i++) {
     cc.save();
-    canvas_draw_runway(cc, airport.runways[i], true);
+    canvas_draw_runway(cc, airport.runways[i][0], true);
+    cc.restore();
+    cc.save();
+    canvas_draw_runway(cc, airport.runways[i][1], true);
     cc.restore();
   }
+  // Runways
   for( i=0;i<airport.runways.length;i++) {
     cc.save();
-    canvas_draw_runway(cc, airport.runways[i], false);
+    canvas_draw_runway(cc, airport.runways[i][0], false);
     cc.restore();
   }
 }
 
 function canvas_draw_runway_labels(cc) {
   "use strict";
+  if(!prop.canvas.draw_labels) return;
   cc.fillStyle   = "rgba(255, 255, 255, 0.8)";
   var airport=airport_get();
   for(var i=0;i<airport.runways.length;i++) {
     cc.save();
-    canvas_draw_runway_label(cc, airport.runways[i]);
+    canvas_draw_runway_label(cc, airport.runways[i][0]);
+    cc.restore();
+    cc.save();
+    canvas_draw_runway_label(cc, airport.runways[i][1]);
     cc.restore();
   }
 }
@@ -253,12 +233,13 @@ function canvas_draw_fix(cc, name, fix) {
 
 function canvas_draw_fixes(cc) {
   "use strict";
+  if(!prop.canvas.draw_labels) return;
   cc.lineJoin    = "round";
   cc.font = "10px monoOne, monospace";
   var airport=airport_get();
   for(var i in airport.real_fixes) {
     cc.save();
-    cc.translate(round(km_to_px(airport.fixes[i][0])) + prop.canvas.panX, -round(km_to_px(airport.fixes[i][1])) + prop.canvas.panY);
+    cc.translate(round(km_to_px(airport.fixes[i].position[0])) + prop.canvas.panX, -round(km_to_px(airport.fixes[i].position[1])) + prop.canvas.panY);
 
     // draw outline (draw with eraser)
     cc.strokeStyle = "rgba(0, 0, 0, 0.67)";
@@ -266,14 +247,14 @@ function canvas_draw_fixes(cc) {
     cc.globalCompositeOperation = 'destination-out';
     cc.lineWidth   = 4;
     
-    canvas_draw_fix(cc, i, airport.fixes[i]);
+    canvas_draw_fix(cc, i, airport.fixes[i].position);
 
     cc.strokeStyle = "rgba(255, 255, 255, 0)";
     cc.fillStyle   = "rgba(255, 255, 255, 0.5)";
     cc.globalCompositeOperation = 'source-over';
     cc.lineWidth   = 1;
 
-    canvas_draw_fix(cc, i, airport.fixes[i]);
+    canvas_draw_fix(cc, i, airport.fixes[i].position);
     cc.restore();
   }
 }
@@ -281,29 +262,47 @@ function canvas_draw_fixes(cc) {
 function canvas_draw_sids(cc) {
   "use strict";
   if (!prop.canvas.draw_sids) return;
-
+  var text_at_point = [] // Store the count of sid text drawn for a specific transition
   var departure_colour = "rgba(128, 255, 255, 0.6)";
   cc.strokeStyle = departure_colour;
   cc.fillStyle = departure_colour;
   cc.setLineDash([1,10]);
   cc.font = "italic 14px monoOne, monospace";
   var airport = airport_get();
-  for(var s in airport.departures.sids) {
-    var fixList = airport.departures.sids[s];
-    var fx, fy;
-    for(var i=0; i<fixList.length; i++) {
-      var fix = airport.getFix(fixList[i]);
-      fx = km_to_px(fix[0]) + prop.canvas.panX;
-      fy = -km_to_px(fix[1]) + prop.canvas.panY;
-      if(i === 0) {
-        cc.beginPath();
-        cc.moveTo(fx, fy);
-      } else {
-        cc.lineTo(fx, fy);
+  for(var s in airport.sids) {
+    var write_sid_name = true;
+    if(airport.sids[s].hasOwnProperty("draw")) {
+      for(var i in airport.sids[s].draw) {
+        var fixList = airport.sids[s].draw[i];
+        var fx, fy, exit_name = null;
+        for(var j=0; j<fixList.length; j++) {
+          if(fixList[j].indexOf("*") != -1) { // write exitPoint name
+            exit_name = fixList[j].replace("*","");
+            write_sid_name = false;
+          }
+          var fix = airport.getFix(fixList[j].replace("*",""));
+          if(!fix) log('Unable to draw line to "'+fixList[j]+'" because its position is not defined!', LOG_WARNING);
+          fx = km_to_px(fix[0]) + prop.canvas.panX;
+          fy = -km_to_px(fix[1]) + prop.canvas.panY;
+          if(j === 0) {
+            cc.beginPath();
+            cc.moveTo(fx, fy);
+          } else {
+            cc.lineTo(fx, fy);
+          }
+        }
+        cc.stroke();
+        if(exit_name){
+          if(isNaN(text_at_point[exit_name])){  // Initialize count for this transition
+            text_at_point[exit_name] = 0;
+          }
+          var y_point = fy +(15*text_at_point[exit_name]);  // Move the y point for drawing depending on how many sids we have drawn text for at this point already
+          cc.fillText(s + "." + exit_name, fx+10, y_point);
+          text_at_point[exit_name] += 1;  // Increment the count for this transition
+        }
       }
+      if(write_sid_name) cc.fillText(s, fx+10, fy);
     }
-    cc.stroke();
-    cc.fillText(s, fx+10, fy);
   }
 }
 
@@ -311,14 +310,15 @@ function canvas_draw_separation_indicator(cc, aircraft) {
   "use strict";
   // Draw a trailing indicator 2.5 NM (4.6km) behind landing aircraft to help with traffic spacing
   var rwy = airport_get().getRunway(aircraft.fms.currentWaypoint().runway);
-  var angle = rwy.getAngle(aircraft.fms.currentWaypoint().runway) + Math.PI;
+  if(!rwy) return;
+  var angle = rwy.angle + Math.PI;
   cc.strokeStyle = "rgba(224, 128, 128, 0.8)";
   cc.lineWidth = 3;
   cc.translate(km_to_px(aircraft.position[0]) + prop.canvas.panX, -km_to_px(aircraft.position[1]) + prop.canvas.panY);
   cc.rotate(angle);
   cc.beginPath();
-  cc.moveTo(-5, -km_to_px(4.6));
-  cc.lineTo(+5, -km_to_px(4.6));
+  cc.moveTo(-5, -km_to_px(5.556));  // 5.556km = 3.0nm
+  cc.lineTo(+5, -km_to_px(5.556));  // 5.556km = 3.0nm
   cc.stroke();
 }
 
@@ -398,7 +398,7 @@ function canvas_draw_aircraft(cc, aircraft) {
 
   if(aircraft.position_history.length > trailling_length) aircraft.position_history = aircraft.position_history.slice(aircraft.position_history.length - trailling_length, aircraft.position_history.length);
 
-  if( aircraft.isPrecisionGuided() && aircraft.altitude > 1000) {
+  if(aircraft.isPrecisionGuided()) {
     cc.save();
     canvas_draw_separation_indicator(cc, aircraft);
     cc.restore();
@@ -572,219 +572,147 @@ function canvas_draw_all_aircraft(cc) {
   // console.timeEnd('canvas_draw_all_aircraft')
 }
 
+/** Draw an aircraft's data block
+ ** (box that contains callsign, altitude, speed)
+ */
 function canvas_draw_info(cc, aircraft) {
   "use strict";
-
   if(!aircraft.isVisible()) return;
-
   if(!aircraft.hit) {
+    
+    // Initial Setup
     cc.save();
-
-    cc.textBaseline = "middle";
-
-    var width  = 60;
+    var cs = aircraft.getCallsign();
+    var paddingLR = 5;
+    var width  = clamp(1, 5.8*cs.length) + (paddingLR*2); // width of datablock (scales to fit callsign)
     var width2 = width / 2;
-
-    var height  = 35;
-    var height2 = height / 2;
-
-    var bar_width = width / 15;
+    var height  = 31;               // height of datablock
+    var height2 = height / 2; 
+    var bar_width = width / 18;     // width of colored bar
     var bar_width2 = bar_width / 2;
-
     var ILS_enabled = aircraft.fms.currentWaypoint().runway && aircraft.category === "arrival";
     var lock_size = height / 3;
     var lock_offset = lock_size / 8;
     var pi = Math.PI;
     var point1 = lock_size - bar_width2;
-
-  	//angle for the clipping mask
+    var alt_trend_char = "";
     var a = point1 - lock_offset;
     var b = bar_width2;
-  	//var c = Math.sqrt(Math.pow(a, 2) + Math.pow(b, 2));
     var clipping_mask_angle = Math.atan(b / a);
+    var pi_slice = pi / 24;         // describes how far around to arc the arms of the ils lock case
 
-    var match        = false;
-    var almost_match = false;
-
+    // Callsign Matching
     if(prop.input.callsign.length > 1 && aircraft.matchCallsign(prop.input.callsign.substr(0, prop.input.callsign.length - 1)))
-      almost_match = true;
+      var almost_match = true;
     if(prop.input.callsign.length > 0 && aircraft.matchCallsign(prop.input.callsign))
-      match = true;
+      var match = true;
 
-    if(match && false) {
-      cc.save();
-      cc.strokeStyle = "rgba(120, 140, 130, 1.0)";
-      cc.lineWidth = 2;
-      a = [km_to_px(aircraft.position[0]), -km_to_px(aircraft.position[1])];
-      var h = aircraft.html.outerHeight();
-      b = [prop.canvas.size.width / 2 - 10, -(prop.canvas.size.height / 2) + aircraft.html.offset().top + h / 2];
-      var angle = Math.atan2(a[0] - b[0], a[1] - b[1]);
-      var distance = 10;
-      cc.beginPath();
-      cc.moveTo(Math.sin(angle) * -distance + a[0], Math.cos(angle) * -distance + a[1]);
-      cc.lineTo(b[0], b[1]);
-      cc.stroke();
+    // set color, intensity, and style elements
+    if (match) var alpha = 0.9;
+    // else if(almost_match) var alpha = 0.75;
+    else if (aircraft.inside_ctr) var alpha = 0.5;
+    else var alpha = 0.2;
+    var red   = "rgba(224, 128, 128, " + alpha + ")";
+    var green = "rgba( 76, 118,  97, " + alpha + ")";
+    var blue  = "rgba(128, 255, 255, " + alpha + ")";
+    var white = "rgba(255, 255, 255, " + alpha + ")";
+    cc.textBaseline = "middle";
 
-      cc.beginPath();
-      cc.moveTo(b[0], b[1] - h / 2);
-      cc.lineTo(b[0], b[1] + h / 2);
-      cc.lineWidth = 4;
-      cc.stroke();
-      cc.restore();
+    // Move to center of where the data block is to be drawn
+    var ac_pos = [round(km_to_px(aircraft.position[0])) + prop.canvas.panX,
+                 -round(km_to_px(aircraft.position[1])) + prop.canvas.panY];
+    if(aircraft.datablockDir == -1) { // game will move FDB to the appropriate position
+      if(-km_to_px(aircraft.position[1]) + prop.canvas.size.height/2 < height * 1.5)
+        cc.translate(ac_pos[0], ac_pos[1] + height2 + 12);
+      else cc.translate(ac_pos[0], ac_pos[1] -height2 - 12);
+    }
+    else {  // user wants to specify FDB position
+      var displacements = {
+        "ctr": [0,0],
+        360  : [0, -height2 - 12],
+        45   : [width2 + 8.5, -height2 - 8.5],
+        90   : [width2 + bar_width2 + 12, 0],
+        135  : [width2 + 8.5, height2 + 8.5],
+        180  : [0, height2 + 12],
+        225  : [-width2 - 8.5, height2 + 8.5],
+        270  : [-width2 - bar_width2 - 12, 0],
+        315  : [-width2 - 8.5, -height2 - 8.5]
+      };
+      cc.translate(ac_pos[0] + displacements[aircraft.datablockDir][0],
+        ac_pos[1] + displacements[aircraft.datablockDir][1]);
     }
 
-    cc.translate(round(km_to_px(aircraft.position[0])) + prop.canvas.panX, -round(km_to_px(aircraft.position[1])) + prop.canvas.panY);
-
-    if(-km_to_px(aircraft.position[1]) + prop.canvas.size.height/2 < height * 1.5)
-      cc.translate(0,  height2 + 12);
-    else
-      cc.translate(0, -height2 - 12);
-
-    cc.translate(bar_width / 2, 0);
-
-    if (!aircraft.inside_ctr)
-      cc.fillStyle = "rgba(71, 105, 88, 0.3)";
-    else if (match)
-      cc.fillStyle = "rgba(120, 150, 140, 0.9)";
-    else if(almost_match)
-      cc.fillStyle = "rgba(95, 95, 88, 0.9)";
-    else
-      cc.fillStyle = "rgba(71, 105, 88, 0.9)";
-
-    //Background fill and clip for ILS Lock Indicator
-    if (ILS_enabled)
-    {
+    // Draw datablock shapes
+    if(!ILS_enabled) {  // Standard Box
+      cc.fillStyle = green;
+      cc.fillRect(-width2, -height2, width, height); // Draw box
+      cc.fillStyle = (aircraft.category == "departure") ? blue : red;
+      cc.fillRect(-width2 - bar_width, -height2, bar_width, height);  // Draw colored bar
+    }
+    else {  // Box with ILS Lock Indicator
       cc.save();
+
+      // Draw green part of box (excludes space where ILS Clearance Indicator juts in)
+      cc.fillStyle = green;
       cc.beginPath();
-
-      cc.moveTo(-width2, height2);
-      cc.lineTo(width2, height2);
-      cc.lineTo(width2, -height2);
-      cc.lineTo(-width2, -height2);
-
-      //side cutout
-      cc.lineTo(-width2, -point1);
+      cc.moveTo(-width2, height2);  // bottom-left corner
+      cc.lineTo(width2, height2);   // bottom-right corner
+      cc.lineTo(width2, -height2);  // top-right corner
+      cc.lineTo(-width2, -height2); // top-left corner
+      cc.lineTo(-width2, -point1);  // begin side cutout
       cc.arc(-width2 - bar_width2, -lock_offset, lock_size / 2 + bar_width2, clipping_mask_angle - pi / 2, 0);
       cc.lineTo(-width2 + lock_size / 2, lock_offset);
       cc.arc(-width2 - bar_width2, lock_offset, lock_size / 2 + bar_width2, 0, pi / 2 - clipping_mask_angle);
       cc.closePath();
+      cc.fill();
 
-      cc.strokeStyle = cc.fillStyle;
-      cc.stroke();
-      cc.clip();
-      cc.fillRect(-width2, -height2, width, height);
-
-      cc.restore();
-    }
-    else
-      cc.fillRect(-width2, -height2, width, height);
-
-    var alpha = 0.6;
-    if (!aircraft.inside_ctr) alpha = 0.3;
-    else if (match) alpha = 0.9;
-
-    if(aircraft.category === "departure")
-      cc.fillStyle = "rgba(128, 255, 255, " + alpha + ")";
-    else
-      cc.fillStyle = "rgba(224, 128, 128, " + alpha + ")";
-
-  	//sideBar ILS Lock Indicator
-    if (ILS_enabled)
-    {
-      var pi_slice = pi / 24;
-
+      // Draw ILS Clearance Indicator
       cc.translate(-width2 - bar_width2, 0);
-
       cc.lineWidth = bar_width;
-      cc.strokeStyle = cc.fillStyle;
-
-      //top arc
-      cc.beginPath();
+      cc.strokeStyle = red;
+      cc.beginPath(); // top arc start
       cc.arc(0, -lock_offset, lock_size / 2, -pi_slice, pi + pi_slice, true);
       cc.moveTo(0, -lock_size / 2);
       cc.lineTo(0, -height2);
-      cc.stroke();
-
-      //bottom arc
-      cc.beginPath();
+      cc.stroke();    // top arc end
+      cc.beginPath(); //bottom arc start
       cc.arc(0, lock_offset, lock_size / 2, pi_slice, pi - pi_slice);
       cc.moveTo(0, lock_size - bar_width);
       cc.lineTo(0, height2);
-      cc.stroke();
-
-      cc.translate(width2 + bar_width2, 0);
-
-      //ILS locked
-      if (aircraft.mode === "landing")
-      {
-        cc.fillStyle = "white";
-        cc.translate(-width2 - bar_width2, 0);
-
+      cc.stroke();  //bottom arc end
+      if (aircraft.mode === "landing") {  // Localizer Capture Indicator
+        cc.fillStyle = white;
         cc.beginPath();
-        // arc(x,y,radius,startAngle,endAngle, clockwise);
         cc.arc(0, 0, lock_size / 5, 0, pi * 2);
-        cc.fill();
-        cc.translate(width2 + bar_width2, 0);
+        cc.fill();  // Draw Localizer Capture Dot
       }
-    }
-    else
-      cc.fillRect(-width2 - bar_width, -height2, bar_width, height);
+      cc.translate(width2 + bar_width2, 0);
+      // unclear how this works...
+      cc.beginPath(); // if removed, white lines appear on top of bottom half of lock case
+      cc.stroke();    // if removed, white lines appear on top of bottom half of lock case
 
-    if (!aircraft.inside_ctr)
-      cc.fillStyle   = "rgba(255, 255, 255, 0.6)";
-    else if(match)
-      cc.fillStyle   = "rgba(255, 255, 255, 0.9)";
-    else
-      cc.fillStyle   = "rgba(255, 255, 255, 0.8)";
-
-    cc.strokeStyle = cc.fillStyle;
-
-    cc.translate(0, 1);
-
-    var separation  = 8;
-    var line_height = 8;
-
-    cc.lineWidth = 2;
-
-    if(aircraft.trend !== 0) {
-      cc.save();
-      if(aircraft.trend < 0) {
-        cc.translate(1, 6.5);
-      } else if(aircraft.trend > 0) {
-        cc.translate(-1, 6.5);
-        cc.scale(-1, -1);
-      }
-      cc.lineJoin  = "round";
-      cc.beginPath();
-
-      cc.moveTo(0,  -5);
-      cc.lineTo(0,   5);
-      cc.lineTo(-3,  2);
-
-      if(aircraft.fms.currentWaypoint().expedite && aircraft.mode !== "landing") {
-        cc.moveTo(0,   5);
-        cc.lineTo(3,   2);
-      }
-
-      cc.stroke();
       cc.restore();
-    } else {
-      cc.beginPath();
-      cc.moveTo(-4, 7.5);
-      cc.lineTo( 4, 7.5);
-      cc.stroke();
     }
 
-    cc.textAlign = "right";
-    cc.fillText(lpad(round(aircraft.altitude * 0.01), 2), -separation, line_height);
-
+    // Text
+    var gap = 3;          // height of TOTAL vertical space between the rows (0 for touching)
+    var lineheight = 4.5; // height of text row (used for spacing basis)
+    var row1text = cs;
+    var row2text = lpad(round(aircraft.altitude * 0.01), 3) + " " + lpad(round(aircraft.groundSpeed * 0.1), 2);
+    if (aircraft.inside_ctr) cc.fillStyle   = "rgba(255, 255, 255, 0.8)";
+    else cc.fillStyle   = "rgba(255, 255, 255, 0.2)";
+    if(aircraft.trend == 0)     alt_trend_char = String.fromCodePoint(0x2011);  // small dash (symbola font)
+    else if(aircraft.trend > 0) alt_trend_char = String.fromCodePoint(0x1F851); // up arrow (symbola font)
+    else if(aircraft.trend < 0) alt_trend_char = String.fromCodePoint(0x1F853); // down arrow (symbola font)
+    // Draw full datablock text
     cc.textAlign = "left";
-    cc.fillText(lpad(round(aircraft.groundSpeed * 0.1), 2),
-                separation,
-                line_height);
-
+    cc.fillText(row1text, -width2 + paddingLR, -gap/2 - lineheight);
+    cc.fillText(row2text, -width2 + paddingLR, gap/2 + lineheight);
+    // Draw climb/level/descend symbol
+    cc.font = "10px symbola"; // change font to the one with extended unicode characters
     cc.textAlign = "center";
-    cc.fillText(aircraft.getCallsign(), 0, -line_height);
+    cc.fillText(alt_trend_char, -width2 + paddingLR + 20.2, gap/2 + lineheight - 0.25);
+    cc.font = "10px monoOne, monospace";  // change back to normal font
 
     cc.restore();
   }
@@ -868,38 +796,33 @@ function canvas_draw_compass(cc) {
   }
 }
 
+/** Draw circular airspace border
+ */
 function canvas_draw_ctr(cc) {
   "use strict";
   
   //Draw a gentle fill color with border within the bounds of the airport's ctr_radius
-  cc.translate(round(prop.canvas.size.width/2), round(prop.canvas.size.height/2));
-  cc.translate(prop.canvas.panX, prop.canvas.panY);
   cc.fillStyle = "rgba(200, 255, 200, 0.02)";
+	cc.strokeStyle = "rgba(200, 255, 200, 0.25)";
   cc.beginPath();
   cc.arc(0, 0, airport_get().ctr_radius*prop.ui.scale, 0, Math.PI*2);
   cc.fill();
-  //Draw the outline circle
-	cc.beginPath();
-  cc.linewidth = 1;
-	cc.arc(0, 0, airport_get().ctr_radius*prop.ui.scale, 0, Math.PI*2);
-	cc.strokeStyle = "rgba(200, 255, 200, 0.25)";
 	cc.stroke();
+}
 
-  // Check if range ring characteristics are defined for this airport
-  if(airport_get().hasOwnProperty("rr_radius_nm")) {
-  	var rangeRingRadius = km(airport_get().rr_radius_nm);	//convert input param from nm to km
-  }
-  else {
-  	var rangeRingRadius = airport_get().ctr_radius / 4;	//old method
-  }
+/** Draw polygonal airspace border
+ */
+function canvas_draw_airspace_border(cc) {
+  if(!airport_get().airspace) canvas_draw_ctr(cc);
 
-  //Fill up airport's ctr_radius with rings of the specified radius
-  for(var i=1; i*rangeRingRadius < airport_get().ctr_radius; i++) {
-	  cc.beginPath();
-	  cc.linewidth = 1;
-		cc.arc(0, 0, rangeRingRadius*prop.ui.scale*i, 0, Math.PI*2);
-		cc.strokeStyle = "rgba(200, 255, 200, 0.1)";
-		cc.stroke();
+  // style
+  cc.strokeStyle = "rgba(200, 255, 200, 0.25)";
+  cc.fillStyle   = "rgba(200, 255, 200, 0.02)";
+
+  // draw airspace
+  for(var i=0; i<airport_get().airspace.length; i++) {
+    canvas_draw_poly(cc, $.map(airport_get().perimeter.poly, function(v){return [v.position];}));
+    cc.clip();
   }
 }
 
@@ -908,13 +831,13 @@ function canvas_draw_engm_range_rings(cc) {
   "use strict";
   cc.strokeStyle = "rgba(200, 255, 200, 0.3)";
   cc.setLineDash([3,6]);
-  canvas_draw_range_ring(cc, "BAVAD","GM428","GM432");
-  canvas_draw_range_ring(cc, "TITLA","GM418","GM422");
-  canvas_draw_range_ring(cc, "INSUV","GM403","GM416");
-  canvas_draw_range_ring(cc, "VALPU","GM410","GM402");
+  canvas_draw_fancy_rings(cc, "BAVAD","GM428","GM432");
+  canvas_draw_fancy_rings(cc, "TITLA","GM418","GM422");
+  canvas_draw_fancy_rings(cc, "INSUV","GM403","GM416");
+  canvas_draw_fancy_rings(cc, "VALPU","GM410","GM402");
 }
 
-function canvas_draw_range_ring(cc, fix_origin, fix1, fix2) {
+function canvas_draw_fancy_rings(cc, fix_origin, fix1, fix2) {
   "use strict";
   var arpt = airport_get();
   var origin = arpt.getFix(fix_origin);
@@ -932,6 +855,19 @@ function canvas_draw_range_ring(cc, fix_origin, fix1, fix2) {
   for( var i=0; i<4; i++) {
     cc.beginPath();
     cc.arc(x, y, km_to_px(minDist - (i*radius)), start_angle, end_angle);
+    cc.stroke();
+  }
+}
+
+function canvas_draw_range_rings(cc) {
+  var rangeRingRadius = km(airport_get().rr_radius_nm); //convert input param from nm to km
+
+  //Fill up airport's ctr_radius with rings of the specified radius
+  for(var i=1; i*rangeRingRadius < airport_get().ctr_radius; i++) {
+    cc.beginPath();
+    cc.linewidth = 1;
+    cc.arc(0, 0, rangeRingRadius*prop.ui.scale*i, 0, Math.PI*2);
+    cc.strokeStyle = "rgba(200, 255, 200, 0.1)";
     cc.stroke();
   }
 }
@@ -1068,6 +1004,45 @@ function canvas_draw_restricted(cc) {
   cc.restore();
 }
 
+function canvas_draw_videoMap(cc) {
+  "use strict";
+  if(!airport_get().hasOwnProperty("maps")) return;
+
+  cc.strokeStyle = "#c1dacd";
+  cc.lineWidth   = prop.ui.scale / 15;
+  cc.lineJoin    = "round";
+  cc.font = "10px monoOne, monospace";
+  
+  var airport=airport_get();
+  var map = airport.maps.base;
+  cc.save();
+  cc.translate(prop.canvas.panX, prop.canvas.panY);
+  for(var i in map) {
+    cc.moveTo(km_to_px(map[i][0]), -km_to_px(map[i][1]));
+    // cc.beginPath();
+    cc.lineTo(km_to_px(map[i][2]), -km_to_px(map[i][3]));
+  }
+    cc.stroke();
+  cc.restore();
+}
+
+/** Draws crosshairs that point to the currently translated location
+ */
+function canvas_draw_crosshairs(cc) {
+  cc.save();
+  cc.strokeStyle = "#899";
+  cc.lineWidth = 3;
+  cc.beginPath();
+  cc.moveTo(-10, 0);
+  cc.lineTo( 10, 0);
+  cc.stroke();
+  cc.beginPath();
+  cc.moveTo(0, -10);
+  cc.lineTo(0,  10);
+  cc.stroke();
+  cc.restore();
+}
+
 function canvas_update_post() {
   "use strict";
   var elapsed = game_time() - airport_get().start;
@@ -1089,6 +1064,7 @@ function canvas_update_post() {
 
       cc.save();
       cc.globalAlpha = alpha;
+      canvas_draw_videoMap(cc);
       canvas_draw_terrain(cc);
       canvas_draw_restricted(cc);
       canvas_draw_runways(cc);
@@ -1106,7 +1082,9 @@ function canvas_update_post() {
 
     // Controlled traffic region - (CTR)
     cc.save();
-    canvas_draw_ctr(cc);
+    cc.translate(round(prop.canvas.size.width/2 + prop.canvas.panX), round(prop.canvas.size.height/2 + prop.canvas.panY));   // translate to airport center
+    airport_get().airspace ? canvas_draw_airspace_border(cc) : canvas_draw_ctr(cc); // draw airspace border
+    canvas_draw_range_rings(cc);
     cc.restore();
 
     // Special markings for ENGM point merge
@@ -1155,6 +1133,73 @@ function canvas_update_post() {
     canvas_draw_scale(cc);
     cc.restore();
 
+    cc.save();
+    cc.globalAlpha = alpha;
+    canvas_draw_directions(cc);
+    cc.restore();
+
     prop.canvas.dirty = false;
   }
+}
+
+function canvas_draw_directions(cc) {
+  if (game_paused())
+    return;
+
+  var callsign = prop.input.callsign.toUpperCase();
+  if (callsign.length === 0) {
+    return;
+  }
+
+  // Get the selected aircraft.
+  var aircraft = prop.aircraft.list.filter(function(p) {
+    return p.isVisible() && p.getCallsign().toUpperCase() === callsign;
+  })[0];
+  if (!aircraft) {
+    return;
+  }
+
+  var pos = to_canvas_pos(aircraft.position);
+  var rectPos = [0, 0];
+  var rectSize = [prop.canvas.size.width, prop.canvas.size.height];
+
+  cc.save();
+  cc.strokeStyle = "rgba(224, 224, 224, 0.7)";
+  cc.fillStyle = "rgb(255, 255, 255)";
+  cc.textAlign    = "center";
+  cc.textBaseline = "middle";
+
+  for (var alpha = 0; alpha < 360; alpha++) {
+    var dir = [sin(radians(alpha)), -cos(radians(alpha))];
+    var p = positive_intersection_with_rect(pos, dir, rectPos, rectSize);
+    if (p) {
+      var markLen = (alpha % 5 === 0 ?
+                     (alpha % 10 === 0 ? 16 : 12) :
+                     8);
+      var markWeight = (alpha % 30 === 0 ?  2 : 1);
+
+      var dx = - markLen * dir[0];
+      var dy = - markLen * dir[1];
+
+      cc.lineWidth = markWeight;
+      cc.beginPath();
+      cc.moveTo(p[0], p[1]);
+      var markX = p[0] + dx;
+      var markY = p[1] + dy;
+      cc.lineTo(markX, markY);
+      cc.stroke();
+
+      if (alpha % 10 === 0) {
+        cc.font = (alpha % 30 === 0 ?
+                   "bold 10px monoOne, monospace" :
+                   "10px monoOne, monospace");
+        var text = "" + alpha;
+        var textWidth = cc.measureText(text).width;
+        cc.fillText(text,
+                    markX - dir[0] * (textWidth / 2 + 4),
+                    markY - dir[1] * 7);
+      }
+    }
+  }
+  cc.restore();
 }

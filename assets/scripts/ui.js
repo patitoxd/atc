@@ -60,6 +60,7 @@ function ui_init() {
     ".toggle-tutorial": tutorial_toggle,
     ".pause-toggle": game_pause_toggle,
     "#paused img": game_unpause,
+    ".toggle-labels": canvas_labels_toggle,
     ".toggle-restricted-areas": canvas_restricted_toggle,
     ".toggle-sids": canvas_sids_toggle,
     ".toggle-terrain": canvas_terrain_toggle
@@ -139,7 +140,7 @@ function ui_complete() {
 
     var html = $("<li class='airport icao-"+airport.icao.toLowerCase()+"'>" +
                  "<span style='font-size: 7pt' class='difficulty'>" + difficulty + "</span>" +
-                 "<span class='icao'>" + airport.icao + "</span>" +
+                 "<span class='icao'>" + airport.icao.toUpperCase() + "</span>" +
                  "<span class='name'>" + airport.name + "</span></li>");
 
     html.click(airport.icao.toLowerCase(), function(e) {
@@ -163,14 +164,6 @@ function px_to_km(pixels) {
 
 function km_to_px(kilometers) {
   return kilometers * prop.ui.scale;
-}
-
-function km(nm) {
-  return nm * 1.852;
-}
-
-function nm(km) {
-  return km / 1.852;
 }
 
 function ui_log(message) {
@@ -216,6 +209,11 @@ function ui_airport_close() {
 function ui_airport_toggle() {
   if($("#airport-switch").hasClass("open")) ui_airport_close();
   else                                      ui_airport_open();
+}
+
+function canvas_labels_toggle(evt) {
+  $(evt.target).closest('.control').toggleClass('active');
+  prop.canvas.draw_labels = !prop.canvas.draw_labels;
 }
 
 function canvas_restricted_toggle(evt) {

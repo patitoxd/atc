@@ -1,8 +1,9 @@
+/** Details about aircraft in close proximity in relation to 'the rules'
+ */
 zlsa.atc.Conflict = Fiber.extend(function() {
   return {
     init: function(first, second) {
       this.aircraft = [first, second];
-
       this.distance = vlen(vsub(first.position, second.position));
       this.distance_delta = 0;
       this.altitude = abs(first.altitude - second.altitude);
@@ -55,18 +56,15 @@ zlsa.atc.Conflict = Fiber.extend(function() {
      */
     update: function() {
       // Avoid triggering any more conflicts if the two aircraft have collided
-      if (this.collided)
-        return;
+      if (this.collided) return;
 
       var d = this.distance;
-      this.distance = vlen(vsub(this.aircraft[0].position,
-                                this.aircraft[1].position));
+      this.distance = vlen(vsub(this.aircraft[0].position, this.aircraft[1].position));
       this.distance_delta = this.distance - d;
-
       this.altitude = abs(this.aircraft[0].altitude - this.aircraft[1].altitude);
 
       // Check if the separation is now beyond the bounding box check
-      if (this.distance > 14.2) {
+      if (this.distance > 14.816) { // 14.816km = 8nm (max possible sep minmum)
         this.remove();
         return;
       }
@@ -75,8 +73,9 @@ zlsa.atc.Conflict = Fiber.extend(function() {
       this.checkRunwayCollision();
 
       // Ignore aircraft below about 1000 feet
-      if ((this.aircraft[0].altitude < 990) ||
-          (this.aircraft[1].altitude < 990))
+      var airportElevation = airport_get().elevation;
+      if (((this.aircraft[0].altitude - airportElevation) < 990) ||
+          ((this.aircraft[1].altitude - airportElevation) < 990))
         return;
 
       // Ignore aircraft in the first minute of their flight
@@ -88,6 +87,9 @@ zlsa.atc.Conflict = Fiber.extend(function() {
       this.checkProximity();
     },
 
+    /**
+     * Remove conflict for both aircraft
+     */
     remove: function() {
       this.aircraft[0].removeConflict(this.aircraft[1]);
       this.aircraft[1].removeConflict(this.aircraft[0]);
@@ -97,6 +99,7 @@ zlsa.atc.Conflict = Fiber.extend(function() {
      * Check for collision
      */
     checkCollision: function() {
+      if(this.aircraft[0].isLanded() || this.aircraft[1].isLanded()) return;  // TEMPORARY FIX FOR CRASHES BTWN ARRIVALS AND TAXIIED A/C
       // Collide within 160 feet
       if (((this.distance < 0.05) && (this.altitude < 160)) &&
           (this.aircraft[0].isVisible() && this.aircraft[1].isVisible()))
@@ -108,6 +111,19 @@ zlsa.atc.Conflict = Fiber.extend(function() {
         prop.game.score.hit += 1;
         this.aircraft[0].hit = true;
         this.aircraft[1].hit = true;
+
+        // If either are in runway queue, remove them from it
+        for(var i in airport_get().runways) {
+          var rwy = airport_get().runways[i];
+
+          // Primary End of Runway
+          rwy[0].removeQueue(this.aircraft[0], true);
+          rwy[0].removeQueue(this.aircraft[1], true);
+
+          // Secondary End of Runway
+          rwy[1].removeQueue(this.aircraft[0], true);
+          rwy[1].removeQueue(this.aircraft[1], true);
+        }
       }
     },
 
@@ -121,11 +137,11 @@ zlsa.atc.Conflict = Fiber.extend(function() {
 
       // Check for the same runway, different ends and under about 6 miles
       if ((!this.aircraft[0].isTaxiing() && !this.aircraft[1].isTaxiing()) &&
-          (this.aircraft[0].fms.currentWaypoint().runway != null) &&
-          (this.aircraft[0].fms.currentWaypoint().runway !=
-           this.aircraft[1].fms.currentWaypoint().runway) &&
-          (airport.getRunway(this.aircraft[1].fms.currentWaypoint().runway) ===
-           airport.getRunway(this.aircraft[0].fms.currentWaypoint().runway)) &&
+          (this.aircraft[0].rwy_dep != null) &&
+          (this.aircraft[0].rwy_dep !=
+           this.aircraft[1].rwy_dep) &&
+          (airport.getRunway(this.aircraft[1].rwy_dep) ===
+           airport.getRunway(this.aircraft[0].rwy_dep)) &&
           (this.distance < 10))
       {
         if (!this.conflicts.runwayCollision) {
@@ -155,93 +171,102 @@ zlsa.atc.Conflict = Fiber.extend(function() {
 
       var conflict = false;
       var violation = false;
+      var disableNotices = false;
+      var a1 = this.aircraft[0], a2 = this.aircraft[1];
 
-      // Reduced horizontal separation minima during precision
-      // guided approaches while established
-      if ((this.aircraft[0].isPrecisionGuided() && this.aircraft[0].isEstablished()) &&
-          (this.aircraft[1].isPrecisionGuided() && this.aircraft[1].isEstablished()))
-      {
-        if (this.aircraft[0].fms.currentWaypoint().runway != this.aircraft[1].fms.currentWaypoint().runway)
-        {
-          var ap = airport_get();
-          var separation = Math.max(ap.getRunway(this.aircraft[0].fms.currentWaypoint().runway),
-                                    ap.getRunway(this.aircraft[1].fms.currentWaypoint().runway));
-          conflict = (this.distance < separation);
-          violation = (this.distance < (0.85 * separation)); // 3000 feet
-        }
-        else
-        {
-          conflict = (this.distance < km(2.8));   // 2.8nm
-          violation = (this.distance < km(2.5));  // 2.5nm
+
+      // Standard Basic Lateral Separation Minimum
+      var applicableLatSepMin = 5.556;  // 3.0nm
+
+
+      // Established on precision guided approaches
+      if ( (a1.isPrecisionGuided() && a2.isPrecisionGuided()) &&
+           (a1.rwy_arr != a2.rwy_arr)) { // both are following different instrument approaches
+        var runwayRelationship = airport_get().metadata.rwy[a1.rwy_arr][a2.rwy_arr];
+        if (runwayRelationship.parallel) {
+          // Determine applicable lateral separation minima for conducting
+          // parallel simultaneous dependent approaches on these runways:
+          disableNotices = true;  // hide notices for aircraft on adjacent final approach courses
+          var feetBetween = km_ft(runwayRelationship.lateral_dist);
+          if(feetBetween < 2500)  // Runways separated by <2500'
+            var applicableLatSepMin = 5.556;  // 3.0nm
+          else if(2500 <= feetBetween && feetBetween <= 3600) // 2500'-3600'
+            var applicableLatSepMin = 1.852;  // 1.0nm
+          else if(3600 <  feetBetween && feetBetween <= 4300) // 3600'-4300'
+            var applicableLatSepMin = 2.778;  // 1.5nm
+          else if(4300 <  feetBetween && feetBetween <= 9000) // 4300'-9000'
+            var applicableLatSepMin = 3.704;  // 2.0nm
+          else if(feetBetween > 9000) // Runways separated by >9000'
+            var applicableLatSepMin = 5.556;  // 3.0nm
+          // Note: The above does not take into account the (more complicated)
+          // rules for dual/triple simultaneous parallel dependent approaches as
+          // outlined by FAA JO 7110.65, para 5-9-7. Users playing at any of our
+          // airports that have triple parallels may be able to "get away with"
+          // the less restrictive rules, whilst their traffic may not be 100%
+          // legal. It's just complicated and not currently worthwhile to add
+          // rules for running trips at this point... maybe later. -@erikquinn
+          // Reference: FAA JO 7110.65, section 5-9-6
         }
       }
-      // Standard separation
-      /* 7110.65, section 5-5-7-a-1:
-         (a) Aircraft are on opposite/reciprocal
-         courses and you have observed that they have passed
-         each other; or aircraft are on same or crossing
-         courses/assigned radar vectors and one aircraft has
-         crossed the projected course of the other, and the
-         angular difference between their courses/assigned
-         radar vectors is at least 15 degrees.
-      */
-      else {
-        var offset = abs(angle_offset(this.aircraft[0].groundTrack,
-                                      this.aircraft[1].groundTrack));
 
-        // Check for diverging separation based on heading difference
-        // and being close enough that it may apply.
-        if ((this.distance <= km(4)) && (offset >= radians(15)))
-        {
-          // Opposing courses simply check the distance is increasing
-          if (offset > radians(165)) {
-            if (this.distance_delta <= 0) {
-              conflict = true;
-              violation = (this.distance < km(3)); // 3nm
+
+      // Considering all of the above cases,...
+      violation = (this.distance < applicableLatSepMin);
+      conflict  = (this.distance < applicableLatSepMin + 1.852 && !disableNotices) || violation;  // +1.0nm
+
+
+      // "Passing & Diverging" Rules (the "exception" to all of the above rules)
+      if(conflict) { // test the below only if separation is currently considered insufficient
+        var hdg_difference = abs(angle_offset(a1.groundTrack, a2.groundTrack));
+        if (hdg_difference >= radians(15)) {
+          if (hdg_difference > radians(165)) {  // 'opposite' courses
+            if (this.distance_delta > 0) {  // OKAY IF the distance is increasing
+              conflict = false;
+              violation = false;
             }
           }
-          else {
+          else {  // 'same' or 'crossing' courses
             // Ray intersection from http://stackoverflow.com/a/2932601
-            var ad = vturn(this.aircraft[0].groundTrack);
-            var bd = vturn(this.aircraft[1].groundTrack);
-            var dx = this.aircraft[1].position[0] - this.aircraft[0].position[0];
-            var dy = this.aircraft[1].position[1] - this.aircraft[0].position[1];
+            var ad = vturn(a1.groundTrack);
+            var bd = vturn(a2.groundTrack);
+            var dx = a2.position[0] - a1.position[0];
+            var dy = a2.position[1] - a1.position[1];
             var det = bd[0] * ad[1] - bd[1] * ad[0];
-            // Calculate intersection distance in direction of flight
-            var u = (dy * bd[0] - dx * bd[1]) / det;
-            var v = (dy * ad[0] - dx * ad[1]) / det;
-
-            // Check if both aircraft still have to fly a positive distance
-            if ((u >= 0) && (v >= 0)) {
-              conflict = true;
-              violation = (this.distance < km(3)); // 3nm
+            var u = (dy * bd[0] - dx * bd[1]) / det;  // a1's distance from point of convergence
+            var v = (dy * ad[0] - dx * ad[1]) / det;  // a2's distance from point of convergence
+            if ((u < 0) || (v < 0)) { // check if either a/c has passed the point of convergence
+              conflict  = false;  // targets are diverging
+              violation = false;  // targets are diverging
             }
+            // Reference: FAA JO 7110.65, section 5-5-7-a-1:
+            // (a) Aircraft are on opposite/reciprocal courses and you have observed
+            // that they have passed each other; or aircraft are on same or crossing
+            // courses/assigned radar vectors and one aircraft has crossed the
+            // projected course of the other, and the angular difference between
+            // their courses/assigned radar vectors is at least 15 degrees.
           }
-        }
-        else {
-          conflict = (this.distance < km(4)); // 4nm
-          violation = (this.distance < km(3)); // 3nm
         }
       }
 
-      if (conflict)
-        this.conflicts.proximityConflict = true;
-      else
-        this.conflicts.proximityConflict = false;
-
-      if (violation)
-        this.violations.proximityViolation = true;
-      else
-        this.violations.proximityViolation = false;
-
+      // Update Conflicts
+      if (conflict) this.conflicts.proximityConflict = true;
+      else this.conflicts.proximityConflict = false;
+      if (violation) this.violations.proximityViolation = true;
+      else this.violations.proximityViolation = false;
     }
   };
 });
 
+/** Definitions for characteristics of a particular aircraft type
+ */
 var Model=Fiber.extend(function() {
   return {
     init: function(options) {
       if(!options) options={};
+
+      this.loading = true;
+      this.loaded = false;
+      this.priorityLoad = false;
 
       this.name = null;
       this.icao = null;
@@ -270,6 +295,8 @@ var Model=Fiber.extend(function() {
         cruise:  0
       };
 
+      this._pendingAircraft = [];
+
       this.parse(options);
 
       if(options.url) this.load(options.url);
@@ -294,243 +321,963 @@ var Model=Fiber.extend(function() {
       if(data.speed) this.speed = data.speed;
     },
     load: function(url) {
-      this.content = new Content({
-        type: "json",
-        url: url,
-        that: this,
-        callback: function(status, data) {
-          if(status == "ok") {
-            this.parse(data);
+      this._url = url;
+      zlsa.atc.loadAsset({url: url,
+                          immediate: false})
+        .done(function (data) {
+          this.parse(data);
+          this.loading = false;
+          this.loaded = true;
+          this._generatePendingAircraft();
+        }.bind(this))
+        .fail(function (jqXHR, textStatus, errorThrown) {
+          this.loading = false;
+          this._pendingAircraft = [];
+          console.error("Unable to load aircraft/" + this.icao
+                        + ": " + textStatus);
+        }.bind(this));
+    },
+
+    /**
+     * Generate a new aircraft of this model
+     *
+     * Handles the case where this model may be asynchronously loaded
+     */
+    generateAircraft: function(options) {
+      if (!this.loaded) {
+        if (this.loading) {
+          this._pendingAircraft.push(options);
+          if (!this.priorityLoad) {
+            zlsa.atc.loadAsset({url: this._url,
+                                immediate: true});
+            this.priorityLoad = true;
           }
+          return true;
         }
-      });
+        else {
+          console.warn("Unable to spawn aircraft/" + options.icao
+                       + " as loading failed");
+          return false;
+        }
+      }
+      return this._generateAircraft(options);
+    },
+
+    /**
+     * Actual implementation of generateAircraft
+     */
+    _generateAircraft: function(options) {
+      options.model = this;
+      var aircraft = new Aircraft(options);
+      prop.aircraft.list.push(aircraft);
+      console.log("Spawning " + options.category + " : " + aircraft.getCallsign());
+      return true;
+    },
+
+    /**
+     * Generate aircraft which were queued while the model loaded
+     */
+    _generatePendingAircraft: function() {
+      $.each(this._pendingAircraft, function (idx, options) {
+        this._generateAircraft(options);
+      }.bind(this));
+      this._pendingAircraft = null;
     },
   };
 });
 
-/**
- * Manage current and future aircraft waypoints
- *
- * waypoint navmodes
- * -----------------
- * May be one of null, "fix", "heading", "hold", "rwy"
- *
- * * null is assigned, if the plane is not actively following an
- *   objective. This is only the case, if a plane enters the airspace
- *   or an action has been aborted and no new command issued
- * * "fix" is assigned, if the plane is heading for a fix. In this
- *    case, the attribute request.fix is used for navigation
- * * "heading" is assigned, if the plane was given directive to follow
- *    the course set out by the given heading. In this case, the
- *    attributes request.heading and request.turn are used for
- *    navigation
- * * "hold" is assigned, if the plane should hold its position. As
- *    this is archieved by continuously turning, request.turn is used
- *    in this case
- * * "rwy" is assigned, if the plane is heading for a runway. This is
- *    only the case, if the plane was issued the command to land. In
- *    this case, request.runway is used
+/** Build a waypoint object
+ ** Note that .prependLeg() or .appendLeg() or .insertLeg()
+ ** should be called in order to add waypoints to the fms, based on which
+ ** you want. This function serves only to build the waypoint object; it is
+ ** placed by one of the other three functions.
+ */
+zlsa.atc.Waypoint = Fiber.extend(function(data, fms) {
+  return {
+    /** Initialize Waypoint with empty values, then call the parser
+     */
+    init: function(data, fms) {
+      if(data === undefined) data = {};
+      this.altitude = null;
+      this.fix      = null;
+      this.navmode  = null;
+      this.heading  = null;
+      this.turn     = null;
+      this.location = null;
+      this.expedite = false;
+      this.speed    = null;
+      this.hold     = {
+        dirTurns  : null,
+        fixName   : null,
+        fixPos    : null,
+        inboundHdg: null,
+        legLength : null,
+        timer     : 0
+      };
+      this.fixRestrictions = {
+        alt: null,
+        spd: null
+      };
+      this.parse(data, fms);
+    },
+
+    /** Parse input data and apply to this waypoint
+     */
+    parse: function(data, fms) {
+      // Populate Waypoint with data
+      if (data.fix) {
+        this.navmode = 'fix';
+        this.fix = data.fix;
+        this.location = airport_get().getFix(data.fix);
+      }
+      for (var f in data) {
+        if(this.hasOwnProperty(f)) this[f] = data[f];
+      }
+      if(!this.navmode) { // for aircraft that don't yet have proper guidance (eg SID/STAR, for example)
+        this.navmode = "heading";
+        var apt = airport_get();
+        if(data.route.split('.')[0] == apt.icao && this.heading == null) {
+          this.heading = apt.getRunway(apt.runway).angle;  // aim departure along runway heading
+        }
+        else if(data.route.split('.')[0] == "KDBG" && this.heading == null) {
+          this.heading = this.radial + Math.PI;  // aim arrival @ middle of airspace
+        }
+      }
+    }
+  };
+});
+
+/** Build a 'leg' of the route (contains series of waypoints)
+ ** @param {object} data = {route: "KSFO.OFFSH9.SXC", // either a fix, or with format 'start.procedure.end', or "[RNAV/GPS]" for custom positions
+ **                         type: "sid",              // can be 'sid', 'star', 'iap', 'awy', 'fix'
+ **                         firstIndex: 0}            // the position in fms.legs to insert this leg
+ */
+zlsa.atc.Leg = Fiber.extend(function(data, fms) {
+  return {
+    /** Initialize leg with empty values, then call the parser
+     */
+    init: function(data, fms) {
+      if(data === undefined) data = {};
+      this.route         = "[radar vectors]"; // eg 'KSFO.OFFSH9.SXC' or 'FAITH'
+      this.type          = "[manual]";        // can be 'sid', 'star', 'iap', 'awy', 'fix', '[manual]'
+      this.waypoints     = [];                // an array of zlsa.atc.Waypoint objects to follow
+
+      // Fill data with default Leg properties if they aren't specified (prevents wp constructor from getting confused)
+      if(!data.route) data.route = this.route;
+      if(!data.type) data.type = this.type;
+      if(!data.waypoints) data.waypoints = this.waypoints;
+
+      this.parse(data, fms);
+    },
+
+    /** Parse input data and apply to this leg
+     */
+    parse: function(data, fms) {
+      for(var i in data) if(this.hasOwnProperty(i)) this[i] = data[i]; // Populate Leg with data
+      if(this.waypoints.length == 0) this.generateWaypoints(data, fms);
+      if(this.waypoints.length == 0) this.waypoints = [new zlsa.atc.Waypoint({route:""}, fms)];
+    },
+
+    /** Adds zlsa.atc.Waypoint objects to this Leg, based on the route & type
+     */
+    generateWaypoints: function(data, fms) {
+      if(!this.type) return;
+      else if(this.type == "sid") {
+        if(!fms) {
+          log("Attempted to generate waypoints for SID, but cannot because fms ref not passed!", LOG_WARNING);
+          return;
+        }
+        var apt = data.route.split('.')[0];
+        var sid = data.route.split('.')[1];
+        var exit = data.route.split('.')[2];
+        var rwy = fms.my_aircraft.rwy_dep;
+        this.waypoints = [];
+
+        // Generate the waypoints
+        if(!rwy) {
+          ui_log(true, fms.my_aircraft.getCallsign() + " unable to fly SID, we haven't been assigned a departure runway!");
+          return;
+        }
+        var pairs = airport_get(apt).getSID(sid, exit, rwy);
+        // Remove the placeholder leg (if present)
+        if(fms.my_aircraft.isLanded() && fms.legs.length>0
+            && fms.legs[0].route == airport_get().icao && pairs.length>0) {
+          fms.legs.splice(0,1); // remove the placeholder leg, to be replaced below with SID Leg
+        }
+        for (var i=0; i<pairs.length; i++) { // for each fix/restr pair
+          var f = pairs[i][0];
+          var a = null, s = null;
+          if(pairs[i][1]) {
+            var a_n_s = pairs[i][1].toUpperCase().split("|");
+            for(var j in a_n_s) {
+              if(a_n_s[j][0] == "A") a = a_n_s[j].substr(1);
+              else if(a_n_s[j][0] == "S") s = a_n_s[j].substr(1);
+            }
+          }
+          this.waypoints.push(new zlsa.atc.Waypoint({fix:f, fixRestrictions:{alt:a,spd:s}}, fms));
+        }
+        if(!this.waypoints[0].speed) this.waypoints[0].speed = fms.my_aircraft.model.speed.cruise;
+      }
+      else if(this.type == "star") {
+        if(!fms) {
+          log("Attempted to generate waypoints for STAR, but cannot because fms ref not passed!", LOG_WARNING);
+          return;
+        }
+        var entry = data.route.split('.')[0];
+        var star = data.route.split('.')[1];
+        var apt = data.route.split('.')[2];
+        var rwy = fms.my_aircraft.rwy_arr;
+        this.waypoints = [];
+
+        // Generate the waypoints
+        var pairs = airport_get(apt).getSTAR(star, entry, rwy);
+        for (var i=0; i<pairs.length; i++) { // for each fix/restr pair
+          var f = pairs[i][0];
+          var a = null, s = null;
+          if(pairs[i][1]) {
+            var a_n_s = pairs[i][1].toUpperCase().split("|");
+            for(var j in a_n_s) {
+              if(a_n_s[j][0] == "A") a = a_n_s[j].substr(1);
+              else if(a_n_s[j][0] == "S") s = a_n_s[j].substr(1);
+            }
+          }
+          this.waypoints.push(new zlsa.atc.Waypoint({fix:f, fixRestrictions:{alt:a,spd:s}}, fms));
+        }
+        if(!this.waypoints[0].speed)
+          this.waypoints[0].speed = fms.my_aircraft.model.speed.cruise;
+      }
+      else if(this.type == "iap") {
+        // FUTURE FUNCTIONALITY
+      }
+      else if(this.type == "awy") {
+        var start  = data.route.split('.')[0];
+        var airway = data.route.split('.')[1];
+        var end    = data.route.split('.')[2];
+
+        // Verify airway is valid
+        var apt = airport_get();
+        if(!apt.hasOwnProperty("airways") || !apt.airways.hasOwnProperty(airway)) {
+          log("Airway "+airway+" not defined at "+apt.icao, LOG_WARNING);
+          return;
+        }
+
+        // Verify start/end points are along airway
+        var awy = apt.airways[airway];
+        if(!(awy.indexOf(start) != -1 && awy.indexOf(end) != -1)) {
+          log("Unable to follow "+airway+" from "+start+" to "+end, LOG_WARNING);
+          return;
+        }
+
+        // Build list of fixes, depending on direction traveling along airway
+        var fixes = [], readFwd = (awy.indexOf(end) > awy.indexOf(start));
+        if(readFwd) for(var f=awy.indexOf(start); f<=awy.indexOf(end); f++) fixes.push(awy[f]);
+        else for(var f=awy.indexOf(start); f>=awy.indexOf(end); f--) fixes.push(awy[f]);
+
+        // Add list of fixes to this.waypoints
+        this.waypoints = [];
+        this.waypoints = $.map(fixes, function(f){return new zlsa.atc.Waypoint({fix:f}, fms);});
+      }
+      else if(this.type == "fix") {
+        this.waypoints = [];
+        this.waypoints.push(new zlsa.atc.Waypoint({fix:data.route}, fms));
+      }
+      else this.waypoints.push(new zlsa.atc.Waypoint(data, fms));
+    }
+  };
+});
+
+/** Manage current and future aircraft waypoints
+ **
+ ** waypoint navmodes
+ ** -----------------
+ ** May be one of null, "fix", "heading", "hold", "rwy"
+ **
+ ** * null is assigned, if the plane is not actively following an
+ **   objective. This is only the case, if a plane enters the airspace
+ **   or an action has been aborted and no new command issued
+ ** * "fix" is assigned, if the plane is heading for a fix. In this
+ **    case, the attribute request.fix is used for navigation
+ ** * "heading" is assigned, if the plane was given directive to follow
+ **    the course set out by the given heading. In this case, the
+ **    attributes request.heading and request.turn are used for
+ **    navigation
+ ** * "hold" is assigned, if the plane should hold its position. As
+ **    this is archieved by continuously turning, request.turn is used
+ **    in this case
+ ** * "rwy" is assigned, if the plane is heading for a runway. This is
+ **    only the case, if the plane was issued the command to land. In
+ **    this case, request.runway is used
  */
 zlsa.atc.AircraftFlightManagementSystem = Fiber.extend(function() {
   return {
     init: function(options) {
-      this.aircraft = options.aircraft;
-
-      this.waypoints = [];
-      this.addWaypoint();
-    },
-
-    parse: function(options) {
-    },
-
-    /**
-     * Add a waypoint
-     */
-    addWaypoint: function(data) {
-      if (data === undefined)
-        data = {};
-
-      var wp = {
-        name: 'unnamed',
-        navmode: null,
-        heading: null,
-        turn: null,
-        location: null,
-        altitude: null,
-        expedite: false,
-        speed:    null,
-        runway:   null,
+      this.my_aircrafts_eid = options.aircraft.eid;
+      this.my_aircraft = options.aircraft;
+      this.legs = [];
+      this.current = [0,0]; // [current_Leg, current_Waypoint_within_that_Leg]
+      this.fp = { altitude: null, route: [] };
+      this.following = {
+        sid:  null,   // Standard Instrument Departure Procedure
+        star: null,   // Standard Terminal Arrival Route Procedure
+        iap:  null,   // Instrument Approach Procedure (like ILS, GPS, RNAV, VOR-A, etc)
+        awy:  null,   // Airway (V, J, T, Q, etc.)
+        tfc:  null,   // Traffic (another airplane)
+        anything:  false   // T/F flag for if anything is being "followed"
       };
 
-      if (data.fix) {
-        wp.navmode = 'fix';
-        wp.name = data.fix;
-        wp.location = airport_get().getFix(data.fix);
-      }
-
-      for (var f in data) {
-        wp[f] = data[f];
-      }
-
-      this.waypoints.push(wp);
+      // set initial
+      this.fp.altitude = clamp(1000, options.model.ceiling, 60000);
+      if(options.aircraft.category == "arrival")
+        this.prependLeg({route:"KDBG"});
+      else if(options.aircraft.category == "departure")
+        this.prependLeg({route:airport_get().icao});
+      this.update_fp_route();
     },
 
-    /**
-     * Return the current waypoint
+    /******************* FMS FLIGHTPLAN CONTROL FUNCTIONS *******************/
+
+    /** Insert a Leg at the front of the flightplan
      */
-    currentWaypoint: function() {
-      return this.waypoints[0];
+    prependLeg: function (data) {
+      var prev = this.currentWaypoint();
+      this.legs.unshift(new zlsa.atc.Leg(data, this));
+      this.update_fp_route();
+
+      // Verify altitude & speed not null
+      var curr = this.currentWaypoint();
+      if(prev && !curr.altitude) curr.altitude = prev.altitude;
+      if(prev && !curr.speed) curr.speed = prev.speed;
     },
 
-    /**
-     * True if waypoint of the given name exists
+    /** Insert a waypoint at current position and immediately activate it
      */
-    hasWaypoint: function(name) {
-      for (var j=0; j<this.waypoints.length; j++) {
-        if (this.waypoints[j].name == name) {
-          return true;
+    insertWaypointHere: function(data) {
+      var prev = this.currentWaypoint();
+      this.currentLeg().waypoints.splice(this.current[1], 0, new zlsa.atc.Waypoint(data, this));
+      this.update_fp_route();
+
+      // Verify altitude & speed not null
+      var curr = this.currentWaypoint();
+      if(prev && !curr.altitude) curr.altitude = prev.altitude;
+      if(prev && !curr.speed) curr.speed = prev.speed;
+    },
+
+    /** Insert a Leg at a particular position in the flightplan
+     ** Note: if no position passed in, defaults to add to the end
+     */
+    insertLeg: function(data) {
+      if(data.firstIndex == null) data.firstIndex = this.legs.length;
+      var prev = this.currentWaypoint();
+      this.legs.splice(data.firstIndex, 0, new zlsa.atc.Leg(data, this));
+      this.update_fp_route();
+
+      // Adjust 'current'
+      if(this.current[0] >= data.firstIndex) this.current[1] = 0;
+
+      // Verify altitude & speed not null
+      var curr = this.currentWaypoint();
+      if(prev && !curr.altitude) curr.altitude = prev.altitude;
+      if(prev && !curr.speed) curr.speed = prev.speed;
+    },
+
+    /** Insert a Leg at current position immediately activate it
+     */
+    insertLegHere: function(data) {
+      data.firstIndex = this.current[0];  // index of current leg
+      this.insertLeg(data); // put new Leg at current position
+      this.current[1] = 0;  // start at first wp in this new leg
+    },
+
+    /** Insert a Leg at the end of the flightplan
+     */
+    appendLeg: function(data) {
+      this.legs.push(new zlsa.atc.Leg(data, this));
+      this.update_fp_route();
+    },
+
+    /** Insert a waypoint after the *current* waypoint
+     */
+    appendWaypoint: function(data) {
+      this.currentLeg().waypoints.splice(this.current[1]+1, 0, new zlsa.atc.Waypoint(data, this));
+      this.update_fp_route();
+    },
+
+    /** Switch to the next waypoint
+     */
+    nextWaypoint: function() {
+      var prev = this.currentWaypoint();
+      var leg = this.current[0];
+      var wp = this.current[1];
+      if(wp+1 < this.legs[leg].waypoints.length) {
+        this.current[1]++;  // look to next waypoint in current leg
+      }
+      else if(leg+1 < this.legs.length) {
+        this.current[0]++;  // look to the next leg
+        this.current[1]=0;  // look to the first waypoint of that leg
+      }
+
+      // Replace null values with current values
+      var curr = this.currentWaypoint();
+      if(prev && !curr.altitude) curr.altitude = prev.altitude;
+      if(prev && !curr.speed) curr.speed = prev.speed;
+      if(!curr.heading && curr.navmode == "heading") curr.heading = prev.heading;
+    },
+
+    /** Switch to the next Leg
+     */
+    nextLeg: function() {
+      var prev = this.currentWaypoint();
+      this.current[0]++;
+      this.current[1] = 0;
+
+      // Replace null values with current values
+      var curr = this.currentWaypoint();
+      if(prev && !curr.altitude) curr.altitude = prev.altitude;
+      if(prev && !curr.speed) curr.speed = prev.speed;
+      if(!curr.heading && curr.navmode == "heading") curr.heading = prev.heading;
+    },
+
+    /** Skips to the given waypoint
+     ** @param {string} name - the name of the fix to skip to
+     */
+    skipToFix: function(name) {
+      var prev = this.currentWaypoint();
+      for(var l=0; l<this.legs.length; l++) {
+        for(var w=0; w<this.legs[l].waypoints.length; w++) {
+          if(this.legs[l].waypoints[w].fix == name) {
+            this.current = [l,w];
+
+            // Verify altitude & speed not null
+            var curr = this.currentWaypoint();
+            if(prev && !curr.altitude) curr.altitude = prev.altitude;
+            if(prev && !curr.speed) curr.speed = prev.speed;
+
+            return true;
+          }
         }
       }
       return false;
     },
 
-    /**
-     * Switch to the next waypoint
-     */
-    nextWaypoint: function() {
-      var last = this.waypoints.shift();
-
-      if (this.waypoints.length == 0) {
-        this.addWaypoint({
-          navmode: 'heading',
-          heading: this.aircraft.heading,
-          speed: last.speed,
-          altitude: last.altitude,
-        });
-      }
-
-      if (this.waypoints[0].speed == null)
-        this.waypoints[0].speed = last.speed;
-
-      if (this.waypoints[0].altitude == null)
-        this.waypoints[0].altitude = last.altitude;
-    },
-
-    /**
-     * Remove all waypoints except the current one
-     */
-    removeWaypoints: function() {
-      this.waypoints = [this.waypoints[0]];
-    },
-
-    /**
-     * Modify all waypoints
+    /** Modify all waypoints
      */
     setAll: function(data) {
-      for (var i=0; i<this.waypoints.length; i++) {
-        for (var k in data) {
-          this.waypoints[i][k] = data[k];
+      for (var i=0; i<this.legs.length; i++) {
+        for(var j=0; j<this.legs[i].waypoints.length; j++) {
+          for (var k in data) {
+            this.legs[i].waypoints[j][k] = data[k];
+          }
         }
       }
     },
 
-    /**
-     * Modify the current waypoint
+    /** Modify the current waypoint
      */
     setCurrent: function(data) {
       for (var i in data) {
-        this.waypoints[0][i] = data[i];
+        this.currentWaypoint()[i] = data[i];
       }
     },
 
-    /**
-     * Reset waypoints as a list of fixes
+    /** Updates fms.fp.route to correspond with the fms Legs
      */
-    setFixes: function(fixes) {
-      var current = this.waypoints[0];
-      this.waypoints = [];
-      for (var i=0;i< fixes.length;i++) {
-        var f = fixes[i];
-        this.addWaypoint({
-          name: f,
-          navmode: 'fix',
-          location: airport_get().getFix(f),
+    update_fp_route: function() {
+      var r = [];
+      for(var l in this.legs) {
+        if(!this.legs[l].type) continue;
+        else if(this.legs[l].type == "sid") {
+          r.push(this.legs[l].route.split('.')[0]); // departure airport
+          r.push(this.legs[l].route.split('.')[1] + '.' + this.legs[l].route.split('.')[2]);  // 'sidname.exitPoint'
+        }
+        else if(this.legs[l].type == "star") {
+          r.push(this.legs[l].route.split('.')[0] + '.' + this.legs[l].route.split('.')[1]);  // 'entryPoint.starname.exitPoint'
+          r.push(this.legs[l].route.split('.')[2]); // arrival airport
+        }
+        else if(this.legs[l].type == "iap") {
+          continue; // no need to include these in flightplan (because wouldn't happen in real life)
+        }
+        else if(this.legs[l].type == "awy") {
+          if(r[r.length-1] != this.legs[l].route.split('.')[0])
+            r.push(this.legs[l].route.split('.')[0]); // airway entry fix
+          r.push(this.legs[l].route.split('.')[1]); // airway identifier
+          r.push(this.legs[l].route.split('.')[2]); // airway exit fix
+        }
+        else if(this.legs[l].type == "fix") {
+          r.push(this.legs[l].route);
+        }
+        else if(this.legs[l].type == "[manual]") {
+          continue; // no need to include these in flightplan (because wouldn't happen in real life)
+        }
+      }
+      if(r.length == 0) r.push(this.legs[0].route);
+      this.fp.route = r;
+    },
+
+    /** Calls various task-based functions and sets 'fms.following' flags
+     */
+    followCheck: function() {
+      var leg = this.currentLeg();
+      if(leg.type == "sid") {
+        this.following.anything = true;
+        this.following.sid = leg.route.split('.')[1];
+      }
+      else if(leg.type == "star") {
+        this.following.anything = true;
+        this.following.star = leg.route.split('.')[1];
+      }
+      else if(leg.type == "iap") {
+        this.following.anything = true;
+        // this.following.iap = ;  // *******NEEDS TO BE FINISHED***************************
+      }
+      else if(leg.type == "tfc") {    // **FUTURE FUNCTIONALITY**
+        // this.following.anything = true;
+        // this.following.tfc = // EID of the traffic we're following
+      }
+      else if(leg.type == "awy") { // **FUTURE FUNCTIONALITY**
+        this.following.anything = true;
+        this.following.awy = leg.route.split('.')[1];
+      }
+      else {
+        this.followClear();
+        return false;
+      }
+      return this.following;
+    },
+
+    /** Clears any current follows by updating the 'fms.following' flags
+     */
+    followClear: function() {
+      this.following = {
+        sid:  null,
+        star: null,
+        iap:  null,
+        awy:  null,
+        tfc:  null,
+        anything: false
+      };
+    },
+
+    /** Join an instrument approach (eg. ILS/GPS/RNAV/VOR/LAAS/etc)
+     ** @param {string} type - the type of approach (like "ils")
+     ** @param {Runway} rwy - the Runway object the approach ends into
+     ** @param {string} variant - (optional) for stuff like "RNAV-Z 17L"
+     */
+    followApproach: function(type, rwy, /*optional*/ variant) {
+      // Note: 'variant' is set up to pass to this function, but is not used here yet.
+      if(type == "ils") {
+        this.my_aircraft.cancelFix();
+        this.setCurrent({
+          navmode: "rwy",
+          runway: rwy.toUpperCase(),
+          turn: null,
+          start_speed: this.my_aircraft.speed,
         });
       }
-
-      // Restore existing clearances
-      this.waypoints[0].altitude = current.altitude;
-      this.waypoints[0].speed = current.speed;
-      this.waypoints[0].expedite = current.expedite;
-      this.waypoints[0].runway = current.runway;
+      // if-else all the other approach types here...
+      // ILS, GPS, RNAV, VOR, NDB, LAAS/WAAS, MLS, etc...
     },
 
-    /**
-     * Skips waypoints intermediate to the given waypoint
+    /** Inserts the SID as the first Leg in the fms's flightplan
      */
-    skipToWaypoint: function(name) {
-      var current = this.waypoints[0];
-      var i = -1;
-      for (var j=0; j<this.waypoints.length; j++) {
-        if (this.waypoints[j].name == name) {
-          i = j;
-          break;
+    followSID: function(route) {
+      for(var i=0; i<this.legs.length; i++) {
+        if(this.legs[i].route == airport_get().icao)  // sid assigned after taking off without SID
+          this.legs.splice(i,1);  // remove the manual departure leg
+        else if(this.legs[i].type == "sid") // check to see if SID already assigned
+          this.legs.splice(i,1);  // remove the old SID
+      }
+      // Add the new SID Leg
+      this.prependLeg({type:"sid", route:route})
+      this.setAll({altitude:Math.max(airport_get().initial_alt,this.my_aircraft.altitude)});
+    },
+
+    /** Inserts the STAR as the last Leg in the fms's flightplan
+     */
+    followSTAR: function(route) {
+      for(var i=0; i<this.legs.length; i++) {
+        if(this.legs[i].type == "star") // check to see if STAR already assigned
+          this.legs.splice(i,1);  // remove the old STAR
+      }
+      // Add the new STAR Leg
+      this.appendLeg({type:"star", route:route})
+    },
+
+    /** Takes a single-string route and converts it to a semented route the fms can understand
+     ** Note: Input Data Format : "KSFO.OFFSH9.SXC.V458.IPL.J2.JCT..LLO..ACT..KACT"
+     **       Return Data Format: ["KSFO.OFFSH9.SXC", "SXC.V458.IPL", "IPL.J2.JCT", "LLO", "ACT", "KACT"]
+     */
+    formatRoute: function(data) {
+      // Format the user's input
+      var route = [], ap = airport_get, fixOK = ap().getFix;
+      if(data.indexOf(" ") != -1) return; // input can't contain spaces
+      data = data.split('..'); // split apart "direct" pieces
+      for(var i=0; i<data.length; i++) {  // deal with multilinks (eg 'KSFO.OFFSH9.SXC.V458.IPL')
+        if(data[i].split('.').length == 1) {
+          if(!fixOK(data[i])) return;
+          route.push(data[i]); // just a fix/navaid
+          continue;
+        }
+        else {  // is a procedure, eg SID, STAR, IAP, airway, etc.
+          if(data[i].split('.').length % 2 != 1) return;  // user either didn't specify start point or end point
+          else {
+            var pieces = data[i].split('.');
+            var a = [pieces[0] + '.' + pieces[1] + '.' + pieces[2]];
+            for(var j=3; j<data[i].split('.').length; j+2) { // chop up the multilink
+              if(!fixOK(pieces[0]) || !fixOK(pieces[2])) return;  // invalid join/exit points
+              if(!Object.keys(ap().sids).indexOf(pieces[1])
+                || !Object.keys(ap().airways).indexOf(pieces[1])) return; // invalid procedure
+              a.push(pieces[j-1] + '.' + pieces[j] + pieces[j+1]);
+            }
+          }
+        }
+        route = route.concat(a);  // push the properly reformatted multilink
+      }
+      return route;
+    },
+
+    /** Take an array of leg routes and build the legs that will go into the fms
+     ** @param {array} route - an array of properly formatted route strings
+     **                        Example: ["KSFO.OFFSH9.SXC", "SXC.V458.IPL",
+     **                                 "IPL.J2.JCT", "LLO", "ACT", "KACT"]
+     ** @param {boolean} fullRouteClearance - set to true IF you want the provided route to completely
+     **                                       replace the current contents of 'this.legs'
+     */
+    customRoute: function(route, fullRouteClearance) {
+      var legs = [];
+      var curr = this.currentWaypoint(); // save the current waypoint
+      for(var i=0; i<route.length; i++) {
+        if(route[i].split('.').length == 1) { // just a fix/navaid
+          legs.push(new zlsa.atc.Leg({type:"fix", route:route[i]}, this));
+        }
+        else if(route[i].split('.').length == 3) {  // is an instrument procedure
+          var pieces = route[i].split('.');
+          if(Object.keys(airport_get().sids).indexOf(pieces[1]) > -1) {  // it's a SID!
+            legs.push(new zlsa.atc.Leg({type:"sid", route:route[i]}, this));
+          }
+          else if(Object.keys(airport_get().stars).indexOf(pieces[1]) > -1) { // it's a STAR!
+            legs.push(new zlsa.atc.Leg({type:"star", route:route[i]}, this));
+          }
+          else if(Object.keys(airport_get().airways).indexOf(pieces[1]) > -1) { // it's an airway!
+            legs.push(new zlsa.atc.Leg({type:"awy", route:route[i]}, this));
+          }
+        }
+        else {  // neither formatted like "JAN" nor "JAN.V18.MLU"
+          log("Passed invalid route to fms. Unable to create leg from input:" + route[i], LOG_WARNING);
+          return false;
         }
       }
 
-      if (i > 0) {
-        var current = this.waypoints[0];
+      if(!fullRouteClearance) { // insert user's route to the legs
+        // Check if user's route hooks up to the current Legs anywhere
+        var pieces = legs[legs.length-1].route.split('.');
+        var last_fix = pieces[pieces.length-1];
+        var continuity = this.indexOfWaypoint(last_fix);
+        if(continuity) {  // user route connects with existing legs
+          var inMiddleOfLeg = continuity.lw[1] != this.legs[continuity.lw[0]].waypoints.length-1;
+          var legsToRemove = Math.max(0,continuity.lw[0]-inMiddleOfLeg - this.current[0]);
+          if(inMiddleOfLeg) { // change the existing leg @ merge point
+            this.legs[continuity.lw[0]].waypoints.splice(0, continuity.lw[1]);  // Remove the waypoints before the merge point
+            var r = this.legs[continuity.lw[0]].route.split('.');
+            this.legs[continuity.lw[0]].route = last_fix + '.' + r[1] + '.' + r[2]; // Update the leg's route to reflect the change
+          }
+          this.legs.splice.apply(this.legs, [Math.max(0,continuity.lw[0]-legsToRemove), legsToRemove].concat(legs)); // remove old legs before the point where the two routes join
+          // move to the newly inserted Leg
+          this.current[0] = Math.max(0,continuity.lw[0]-legsToRemove);
+          this.current[1] = 0;
+        }
+        else {  // no route continuity... just adding legs
+          this.legs.splice.apply(this.legs, [this.current[0]+1, 0].concat(legs));  // insert the legs after the active Leg
+          this.nextLeg();
+        }
+      }
+      else {  // replace all legs with the legs we've built here in this function
+        this.legs = legs;
+        this.current = [0,0]; // look to beginning of route
+      }
+      this.update_fp_route();
 
-        this.waypoints = this.waypoints.slice(i);
+      // Maintain old speed and altitude
+      if(this.currentWaypoint().altitude == null) this.setCurrent({altitude: curr.altitude});
+      if(this.currentWaypoint().speed == null) this.setCurrent({speed:curr.speed});
 
-        // Restore existing clearances
-        this.waypoints[0].altitude = current.altitude;
-        this.waypoints[0].speed = current.speed;
-        this.waypoints[0].expedite = current.expedite;
-        this.waypoints[0].runway = current.runway;
+      return true;
+    },
+
+    /** Invokes flySID() for the SID in the flightplan (fms.fp.route)
+     */
+    clearedAsFiled: function() {
+      var retval = this.my_aircraft.runSID([aircraft_get(this.my_aircrafts_eid).destination]);
+      var ok = !(Array.isArray(retval) && retval[0]=="fail");
+      return ok;
+    },
+
+    /** Climbs aircraft in compliance with the SID they're following
+     ** Adds altitudes and speeds to each waypoint that are as high as
+     ** possible without exceeding any the following:
+     **    - (alt) airspace ceiling ('ctr_ceiling')
+     **    - (alt) filed cruise altitude
+     **    - (alt) waypoint's altitude restriciton
+     **    - (spd) 250kts when under 10k ft
+     **    - (spd) waypoint's speed restriction
+     */
+    climbViaSID: function() {
+      if(!this.currentLeg().type == "sid") return;
+      var wp = this.currentLeg().waypoints;
+      var cruise_alt = this.fp.altitude;
+      var cruise_spd = this.my_aircraft.model.speed.cruise;
+
+      for(var i=0; i<wp.length; i++) {
+        var a = wp[i].fixRestrictions.alt;
+        var s = wp[i].fixRestrictions.spd;
+
+        // Altitude Control
+        if(a) {
+          if(a.indexOf("+") != -1) {  // at-or-above altitude restriction
+            var minAlt = parseInt(a.replace("+","")) * 100;
+            var alt = Math.min(airport_get().ctr_ceiling, cruise_alt);
+          }
+          else if(a.indexOf("-") != -1) {
+            var maxAlt = parseInt(a.replace("-","")) * 100;
+            var alt = Math.min(maxAlt, cruise_alt) // climb as high as restrictions permit
+          }
+          else var alt = parseInt(a) * 100; // cross AT this altitude
+        }
+        else var alt = Math.min(airport_get().ctr_ceiling, cruise_alt);
+        wp[i].altitude = alt; // add altitudes to wp
+
+        // Speed Control
+        if(s) {
+          if(s.indexOf("+") != -1) {  // at-or-above speed restriction
+            var minSpd = parseInt(s.replace("+",""));
+            var spd = Math.min(minSpd, cruise_spd);
+          }
+          else if(s.indexOf("-") != -1) {
+            var maxSpd = parseInt(s.replace("-",""));
+            var spd = Math.min(maxSpd, cruise_spd) // go as fast as restrictions permit
+          }
+          else var spd = parseInt(s); // cross AT this speed
+        }
+        else var spd = cruise_spd;
+        wp[i].speed = spd;  // add speeds to wp
       }
 
-      return i;
+      // change fms waypoints to wp (which contains the altitudes and speeds)
+      this.legs[this.current[0]].waypoints = wp;
+      return true;
     },
+
+    /** Descends aircraft in compliance with the STAR they're following
+     ** Adds altitudes and speeds to each waypoint in accordance with the STAR
+     */
+    descendViaSTAR: function() {
+      // Find the STAR leg
+      var wp, legIndex;
+      for(var l in this.legs) {
+        if(this.legs[l].type == "star") {
+          legIndex = l;
+          wp = this.legs[l].waypoints; break;
+        }
+      }
+      if(!wp) return;
+
+      var start_alt = this.currentWaypoint().altitude || this.my_aircraft.altitude;
+      var start_spd = this.currentWaypoint().speed || this.my_aircraft.model.speed.cruise;
+
+      for(var i=0; i<wp.length; i++) {
+        if(i >= 1) {
+          start_alt = wp[i-1].altitude;
+          start_spd = wp[i-1].speed;
+        }
+        var a = wp[i].fixRestrictions.alt;
+        var s = wp[i].fixRestrictions.spd;
+
+        // Altitude Control
+        if(a) {
+          if(a.indexOf("+") != -1) {  // at-or-above altitude restriction
+            var minAlt = parseInt(a.replace("+","")) * 100;
+            var alt = Math.max(minAlt, start_alt);
+          }
+          else if(a.indexOf("-") != -1) {
+            var maxAlt = parseInt(a.replace("-","")) * 100;
+            var alt = Math.min(maxAlt, start_alt) // climb as high as restrictions permit
+          }
+          else var alt = parseInt(a) * 100; // cross AT this altitude
+        }
+        else var alt = start_alt;
+        wp[i].altitude = alt; // add altitudes to wp
+
+        // Speed Control
+        if(s) {
+          if(s.indexOf("+") != -1) {  // at-or-above speed restriction
+            var minSpd = parseInt(s.replace("+",""));
+            var spd = Math.min(minSpd, start_spd);
+          }
+          else if(s.indexOf("-") != -1) {
+            var maxSpd = parseInt(s.replace("-",""));
+            var spd = Math.min(maxSpd, start_spd) // go as fast as restrictions permit
+          }
+          else var spd = parseInt(s); // cross AT this speed
+        }
+        else var spd = start_spd;
+        wp[i].speed = spd;  // add speeds to wp
+      }
+
+      // change fms waypoints to wp (which contains the altitudes and speeds)
+      this.legs[legIndex].waypoints = wp;
+      return true;
+    },
+
+
+    /************************** FMS QUERY FUNCTIONS **************************/
+
+    /** True if waypoint of the given name exists
+     */
+    hasWaypoint: function(name) {
+      for(var i=0; i<this.legs.length; i++) {
+        for(var j=0; j<this.legs[i].waypoints.length; j++) {
+          if (this.legs[i].waypoints[j].fix == name) return true;
+        }
+      }
+      return false;
+    },
+
+    /** Returns object's position in flightplan as object with 2 formats
+     ** @param {string} fix - name of the fix to look for in the flightplan
+     ** @returns {wp: "position-of-fix-in-waypoint-list",
+     **           lw: "position-of-fix-in-leg-wp-matrix"}
+     */
+    indexOfWaypoint: function(fix) {
+      var wp = 0;
+      for(var l=0; l<this.legs.length; l++) {
+        for(var w=0; w<this.legs[l].waypoints.length; w++) {
+          if(this.legs[l].waypoints[w].fix == fix) {
+            return {wp:wp, lw:[l,w]};
+          }
+          else {
+            wp++;
+          }
+        }
+      }
+      return false;
+    },
+
+    /** Returns currentWaypoint's position in flightplan as object with 2 formats
+     ** @returns {wp: "position-of-fix-in-waypoint-list",
+     **           lw: "position-of-fix-in-leg-wp-matrix"}
+     */
+    indexOfCurrentWaypoint: function() {
+      var wp = 0;
+      for(var i=0; i<this.current[0]; i++) wp += this.legs[i].waypoints.length;  // add wp's of completed legs
+      wp += this.current[1];
+
+      return {wp:wp, lw:this.current};
+    },
+
+
+    /*************************** FMS GET FUNCTIONS ***************************/
+
+    /** Return the current leg
+     */
+    currentLeg: function() {
+      return this.legs[this.current[0]];
+    },
+
+    /** Return the current waypoint
+     */
+    currentWaypoint: function() {
+      if(this.legs.length < 1) return null;
+      else return this.legs[this.current[0]].waypoints[this.current[1]];
+    },
+
+    /** Returns an array of all fixes along the flightplan route
+     */
+    fixes: function() {
+      return $.map(this.waypoints(),function(w){return w.fix;});
+    },
+
+    /** Return this fms's parent aircraft
+     */
+    my_aircraft: function() {
+      return aircraft_get(this.my_aircrafts_eid);
+    },
+
+    /** Returns a waypoint at the provided position
+     ** @param {array or number} pos - position of the desired waypoint. May be
+     **                          provided either as an array showing the leg and
+     **                          waypoint within the leg (eg [l,w]), or as the
+     **                          number representing the position of the desired
+     **                          waypoint in the list of all waypoints (running
+     **                          this.waypoints() will return the list)
+     ** @returns {Waypoint} - the Waypoint object at the specified location
+     */
+    waypoint: function(pos) {
+      if(Array.isArray(pos)) {  // input is like [leg,waypointWithinLeg]
+        return this.legs[pos[0]].waypoints[pos[1]];
+      }
+      else if(typeof pos == "number") { // input is a position of wp in list of all waypoints
+        var l = 0;
+        while(pos >= 0) {  // count up to pos to locate the waypoint
+          if(this.legs[l].waypoints.length <= pos) {
+            pos -= this.legs[l].waypoints.length;
+            l++;
+          }
+          else return this.legs[l].waypoints[pos];
+        }
+      }
+      else return;
+    },
+
+    /** Returns all waypoints in fms, in order
+     */
+    waypoints: function() {
+      return $.map(this.legs,function(v){return v.waypoints});
+    },
+
+    atLastWaypoint: function() {
+      return this.indexOfCurrentWaypoint().wp == this.waypoints().length-1;
+    }
   };
 });
 
+/** Each simulated aircraft in the game. Contains a model, fms, and conflicts.
+ */
 var Aircraft=Fiber.extend(function() {
-
   return {
     init: function(options) {
       if(!options) options={};
-      this.position    = [0, 0];
+      this.eid          = prop.aircraft.list.length;  // entity ID
+      this.position     = [0, 0];     // Aircraft Position, in km, relative to airport position
+      this.model        = null;       // Aircraft type
+      this.airline      = "";         // Airline Identifier (eg. 'AAL')
+      this.callsign     = "";         // Flight Number ONLY (eg. '551')
+      this.heading      = 0;          // Magnetic Heading
+      this.altitude     = 0;          // Altitude, ft MSL
+      this.speed        = 0;          // Indicated Airspeed (IAS), knots
+      this.groundSpeed  = 0;          // Groundspeed (GS), knots
+      this.groundTrack  = 0;          //
+      this.ds           = 0;          //
+      this.takeoffTime  = 0;          //
+      this.rwy_dep      = null;       // Departure Runway (to use, currently using, or used)
+      this.rwy_arr      = null;       // Arrival Runway (to use, currently using, or used)
+      this.approachOffset = 0;        // Distance laterally from the approach path
+      this.approachDistance = 0;      // Distance longitudinally from the threshold
+      this.radial       = 0;          // Angle from airport center to aircraft
+      this.distance     = 0;          //
+      this.destination  = null;       // Destination they're flying to
+      this.trend        = 0;          // Indicator of descent/level/climb (1, 0, or 1)
+      this.history      = [];         // Array of previous positions
+      this.restricted   = {list:[]};  //
+      this.notice       = false;      // Whether aircraft
+      this.warning      = false;      //
+      this.hit          = false;      // Whether aircraft has crashed
+      this.taxi_next    = false;      //
+      this.taxi_start   = 0;          //
+      this.taxi_time    = 3;          // Time spent taxiing to the runway. *NOTE* this should be INCREASED to around 60 once the taxi vs LUAW issue is resolved (#406)
+      this.rules        = "ifr";      // Either IFR or VFR (Instrument/Visual Flight Rules)
+      this.inside_ctr   = false;      // Inside ATC Airspace
+      this.datablockDir = -1;         // Direction the data block points (-1 means to ignore)
+      this.conflicts    = {};         // List of aircraft that MAY be in conflict (bounding box)
 
-      this.model       = null;
-
-      this.airline     = "";
-      this.callsign    = "";
-
-      this.heading     = 0;
-      this.altitude    = 0;
-      this.speed       = 0;
-      this.groundSpeed = 0;
-      this.groundTrack = 0;
-      this.ds          = 0;
-
-      this.takeoffTime = 0;
-
-      // Distance laterally from the approach path
-      this.approachOffset = 0;
-      // Distance longitudinally from the threshold
-      this.approachDistance = 0;
-
-      this.radial      = 0;
-      this.distance    = 0;
-      this.destination = null;
-
-      this.trend       = 0;
-
-      this.history     = [];
-
-      this.restricted = {list: []};
-      
       if (prop.airport.current.terrain) {
         var terrain = prop.airport.current.terrain;
         this.terrain_ranges = {};
@@ -544,20 +1291,6 @@ var Aircraft=Fiber.extend(function() {
       } else {
         this.terrain_ranges = false;
       }
-      
-      this.notice      = false;
-      this.warning     = false;
-      this.hit         = false;
-
-      this.taxi_next     = false;
-      this.taxi_start    = 0;
-      this.taxi_delay    = 0;
-
-      this.rules       = "ifr";
-
-      this.inside_ctr = false;
-
-      this.conflicts = {};
 
       // Set to true when simulating future movements of the aircraft
       // Should be checked before updating global state such as score
@@ -566,8 +1299,8 @@ var Aircraft=Fiber.extend(function() {
 
       this.position_history = [];
 
-      this.category    = "arrival"; // or "departure"
-      this.mode        = "cruise";  // "apron", "taxi", "waiting", "takeoff", "cruise", or "landing"
+      this.category = options.category; // or "departure"
+      this.mode     = "cruise";  // "apron", "taxi", "waiting", "takeoff", "cruise", or "landing"
       // where:
       // - "apron" is the initial status of a new departing plane. After
       //   the plane is issued the "taxi" command, the plane transitions to
@@ -600,7 +1333,7 @@ var Aircraft=Fiber.extend(function() {
 
       // Initialize the FMS
       this.fms = new zlsa.atc.AircraftFlightManagementSystem({
-        aircraft: this,
+        aircraft: this, model:options.model
       });
 
       //target represents what the pilot makes of the tower's commands. It is
@@ -616,89 +1349,91 @@ var Aircraft=Fiber.extend(function() {
 
       this.emergency = {};
 
-      // Setting up links to restricted areas 
-      var ra = prop.airport.current.restricted_areas; 
+      // Setting up links to restricted areas
+      var ra = prop.airport.current.restricted_areas;
       for (var i in ra) {
         this.restricted.list.push({
           data: ra[i], range: null, inside: false});
       }
 
+      // Initial Runway Assignment
+      if (options.category == "arrival") this.setArrivalRunway(airport_get().runway);
+      else if (options.category == "departure") this.setDepartureRunway(airport_get().runway);
+      this.takeoffTime = (options.category == "arrival") ? game_time() : null;
 
       this.parse(options);
+      this.createStrip();
+      this.updateStrip();
+    },
+    setArrivalWaypoints: function(waypoints) {
+      for (var i=0; i<waypoints.length; i++) {  // add arrival fixes to fms
+        this.fms.appendLeg({type:"fix", route:waypoints[i].fix});
+      }
+      if (this.fms.currentWaypoint().navmode == 'heading') {
+        this.fms.setCurrent({heading: vradial(this.position) + Math.PI,});  // aim aircraft at airport
+      }
+      if(this.fms.legs.length > 0) this.fms.nextWaypoint(); // go to the first fix!
+    },
+    setArrivalRunway: function(rwy) {
+      this.rwy_arr = rwy;
 
+      //Update the assigned STAR to use the fixes for the specified runway, if they exist
+    },
+    setDepartureRunway: function(rwy) {
+      this.rwy_dep = rwy;
+
+      // Update the assigned SID to use the portion for the new runway
+      var l = this.fms.currentLeg();
+      if(l.type == "sid") {
+        var a = $.map(l.waypoints,function(v){return v.altitude});
+        var cvs = !a.every(function(v){return v==airport_get().initial_alt;});
+        this.fms.followSID(l.route);
+        if(cvs) this.fms.climbViaSID();
+      }
+    },
+    cleanup: function() {
+      this.html.remove();
+    },
+    /** Create the aircraft's flight strip and add to strip bay
+     */
+    createStrip:function() {
       this.html = $("<li class='strip'></li>");
 
+      // Top Line Data
       this.html.append("<span class='callsign'>" + this.getCallsign() + "</span>");
-      this.html.append("<span class='heading'>" + round(this.heading) + "</span>");
-      this.html.append("<span class='altitude'>-</span>");
-      this.html.append("<span class='aircraft'>" + this.model.icao + "</span>");
-      if (this.destination)
-        this.html.append("<span class='destination'>" +
-                         heading_to_string(this.destination) +
-                         "</span>");
-      this.html.append("<span class='speed'>-</span>");
+      this.html.append("<span class='heading'>???</span>");
+      this.html.append("<span class='altitude'>???</span>");
 
-      this.html.find(".aircraft").prop("title", this.model.name);
+      // Bottom Line Data
+      if(["H","U"].indexOf(this.model.weightclass) > -1)
+        this.html.append("<span class='aircraft'>" + "H/" + this.model.icao  + "</span>");
+      else this.html.append("<span class='aircraft'>" + this.model.icao + "</span>");
+      this.html.append("<span class='destination'>" + this.destination + "</span>");
+      this.html.append("<span class='speed'>???</span>");
 
-      if(this.category == "arrival") {
-        this.takeoffTime = game_time();
-        this.html.addClass("arrival");
-        this.html.prop("title", "Scheduled for arrival");
-      } else {
-        this.takeoffTime = null;
-        this.html.addClass("departure");
-        this.html.prop("title", "Scheduled for departure");
-      }
+      // Initial Styling
+      if(this.category == "departure") this.html.addClass('departure');
+      else this.html.addClass('arrival');
 
-      if(options.message) {
-        if(this.category == "arrival" && aircraft_visible(this) && !this.inside_ctr) {
-          this.callUp();
-          this.inside_ctr = true;
-        } else if(this.category == "departure") {
-          this.callUp();
-        }
-      }
-
-      $("#strips").append(this.html);
-
+      // Strip Interactivity Functions
+      this.html.find(".strip").prop("title", this.fms.fp.route.join(' '));  // show fp route on hover
       this.html.click(this, function(e) {
         input_select(e.data.getCallsign());
       });
-
       this.html.dblclick(this, function (e) {
         prop.canvas.panX = 0 - round(km_to_px(e.data.position[0]));
         prop.canvas.panY = round(km_to_px(e.data.position[1]));
         prop.canvas.dirty = true;
       });
-      if (this.category == "arrival")
-        this.html.hide(0);
-      if (this.category == "departure")
-        this.inside_ctr = true;
-    },
-    // Ignore waypoints further away from the origin than the aircraft
-    setArrivalWaypoints: function(waypoints) {
-      for (var i=0; i<waypoints.length; i++) {
-        this.fms.addWaypoint(waypoints[i]);
-      }
-      this.fms.nextWaypoint(); // Remove the default waypoint
 
-      var aircraft_dist = vlen(this.position);
-      while (vlen(this.fms.currentWaypoint().location) > aircraft_dist)
-      {
-        this.fms.nextWaypoint();
-        if (!this.fms.currentWaypoint().location)
-          break;
-      }
+      // Add the strip to the html
+      var scrollPos = $("#strips").scrollTop();
+      $("#strips").prepend(this.html);
+      $("#strips").scrollTop(scrollPos + 45);  // shift scroll down one strip's height
 
-      if (this.fms.currentWaypoint().navmode == 'heading') {
-        this.fms.setCurrent({
-          heading: vradial(this.position) + Math.PI,
-        });
-      }
-    },
-
-    cleanup: function() {
-      this.html.remove();
+      // Determine whether or not to show the strip in our bay
+      if (this.category == "arrival") this.html.hide(0);
+      else if (this.category == "departure") this.inside_ctr = true;
     },
     // Called when the aircraft crosses the center boundary
     crossBoundary: function(inbound) {
@@ -710,33 +1445,49 @@ var Aircraft=Fiber.extend(function() {
         this.showStrip();
         this.callUp();
       }
-      // Leaving the center
+      // Leaving the facility's airspace
       else {
         this.hideStrip();
 
-        // Fly away!
-        this.fms.setCurrent({
-          navmode: "heading",
-          heading: this.radial,
-          turn: null,
-          hold: false,
-          altitude: 20000,
-          speed: 330,
-        });
-
         if (this.category == "departure") {
-          // Within 5 degrees of destination heading
-          if (abs(this.radial - this.destination) < 0.08726) {
-            this.radioCall("leaving radar coverage", "dep");
-            prop.game.score.departure += 1;
+          if(this.destination == "number") {
+            // Within 5 degrees of destination heading
+            if (abs(this.radial - this.destination) < 0.08726) {
+              this.radioCall("switching to center, good day", "dep");
+              prop.game.score.departure += 1;
+            }
+            else {
+              this.radioCall("leaving radar coverage outside departure window", "dep", true);
+              prop.game.score.departure -= 1;
+            }
           }
-          else {
-            this.radioCall("leaving radar coverage outside departure window", "dep", true);
-            prop.game.score.departure -= 1;
+          else { // following a Standard Instrument Departure procedure
+            // Find the desired SID exitPoint
+            var exit;
+            for(var l in this.fms.legs) {
+              if(this.fms.legs[l].type == "sid") {
+                exit = this.fms.legs[l].waypoints[this.fms.legs[l].waypoints.length-1].fix;
+                break;
+              }
+            }
+            // Verify aircraft was cleared to departure fix
+            var ok = false;
+            for(var i=0; i<this.fms.waypoints().length; i++)
+              if(this.fms.waypoints()[i].fix == exit) {ok = true; break;}
+            if(ok) {
+              this.radioCall("switching to center, good day", "dep");
+              prop.game.score.departure += 1;
+            }
+            else {
+              this.radioCall("leaving radar coverage without being cleared to " +
+                this.fms.fp.route[1].split(".")[1],"dep",true)
+              prop.game.score.departure -= 1;
+            }
           }
+          this.fms.setCurrent({altitude:this.fms.fp.altitude, speed:this.model.speed.cruise});
         }
         if (this.category == "arrival") {
-          this.radioCall("leaving radar coverage as arrival", "dep", true);
+          this.radioCall("leaving radar coverage as arrival", "app", true);
           prop.game.score.failed_arrival += 1;
         }
       }
@@ -766,7 +1517,7 @@ var Aircraft=Fiber.extend(function() {
       }
       var cs = airline_get(this.airline).callsign;
       if(cs == "November") cs += " " + radio_spellOut(callsign) + heavy;
-      else cs += " " + groupNumbers(callsign) + heavy;
+      else cs += " " + groupNumbers(callsign, this.airline) + heavy;
       return cs;
     },
     getClimbRate: function() {
@@ -781,7 +1532,7 @@ var Aircraft=Fiber.extend(function() {
       }
       else { // in lower stratosphere
         //re-do for lower stratosphere
-        //Reference: https://www.grc.nasa.gov/www/k-12/rocket/atmos.html 
+        //Reference: https://www.grc.nasa.gov/www/k-12/rocket/atmos.html
         //also recommend using graphing calc from desmos.com
         return this.model.rate.climb; // <-- NOT VALID! Just a placeholder!
       }
@@ -799,7 +1550,7 @@ var Aircraft=Fiber.extend(function() {
       }
       else { // in lower stratosphere
         //re-do for lower stratosphere
-        //Reference: https://www.grc.nasa.gov/www/k-12/rocket/atmos.html 
+        //Reference: https://www.grc.nasa.gov/www/k-12/rocket/atmos.html
         //also recommend using graphing calc from desmos.com
         return this.model.rate.climb; // <-- NOT VALID! Just a placeholder!
       }
@@ -810,184 +1561,49 @@ var Aircraft=Fiber.extend(function() {
     },
 
     COMMANDS: {
-        /*
-        command name: {
-          func: ['name of function to call'],
-          shortkey: [list of shortKeys],
-              //Note: normal command/synonyms require format 'command arg'. Shortkeys
-              //instead are meant to NOT have the space that is required to properly
-              //parse the command. Shortkeys take the format of (shortkey character)
-              //followed by (command argument). Note that shortkeys MUST ALL HAVE FIRST
-              //CHARACTERS THAT ARE UNIQUE from each other, as that is how they are 
-              //currently being identified. Examples of valid commands:
-              //'<250', '^6', '^6000', '.DUMBA'
-            synonyms: [list of synonyms]},
-              //Note: synonyms can be entered into the command bar by users and they 
-              //have the same effect as typing the actual command, and use the same
-              //format as the full command. Examples of valid commands:
-              //'altitude 5'=='c 5', land 16'=='l 16', 'fix DUMBA'='f DUMBA'
-        */
-        abort: {func: 'runAbort'},
+      abort: 'runAbort',
+      altitude: 'runAltitude',
+      clearedAsFiled: 'runClearedAsFiled',
+      climbViaSID: 'runClimbViaSID',
+      debug: 'runDebug',
+      delete: 'runDelete',
+      descendViaSTAR: 'runDescendViaSTAR',
+      direct: 'runDirect',
+      fix: 'runFix',
+      flyPresentHeading: 'runFlyPresentHeading',
+      heading: 'runHeading',
+      hold: 'runHold',
+      land: 'runLanding',
+      moveDataBlock: 'runMoveDataBlock',
+      route: 'runRoute',
+      reroute: 'runReroute',
+      sayRoute: 'runSayRoute',
+      sid: 'runSID',
+      speed: 'runSpeed',
+      star: 'runSTAR',
+      takeoff: 'runTakeoff',
+      taxi: 'runTaxi'
+    },
 
-        altitude: {
-          func: 'runAltitude',
-          shortKey: ['\u2B61', '\u2B63'],
-          synonyms: ['a', 'c', 'climb', 'd', 'descend']},
-
-        debug: {func: 'runDebug'},
-
-        direct: {
-          func: 'runDirect',
-          synonyms: ['dct']},
-
-        fix: {
-          func: 'runFix',
-          synonyms: ['f', 'track']},
-
-        heading: {
-          func: 'runHeading',
-          shortKey: ['\u2BA2','\u2BA3','fh'],
-          synonyms: ['t', 'h', 'turn']},
-
-        hold: {
-          func: 'runHold',
-          synonyms: ['circle']},
-
-        land: {
-          func: 'runLanding',
-          shortKey: ['\u2B50'],
-          synonyms: ['l', 'ils']},
-
-        proceed: {
-          func: 'runProceed',
-          synonyms: ['pr']},
-
-        sid: {func: 'runSID'},
-
-        speed: {
-          func: 'runSpeed',
-          shortKey: ['+', '-'],
-          synonyms: ['slow', 'sp']},
-
-        takeoff: {
-          func: 'runTakeoff',
-          synonyms: ['to', 'cto']},
-
-        wait: {
-          func: 'runWait',
-          synonyms: ['w', 'taxi']}
-      },
-    
-    runCommand: function(command) {
+    runCommands: function(commands) {
       if (!this.inside_ctr)
         return true;
-      var user_input = $.map(command.toLowerCase().split(" "), function(v) {if (v.length > 0) return v; });
-      var commands = [];
-      var commandArguments  = "";
-      var previous = "";
-      var longCmdName = "";
-      var thisStringAlreadyDone = false;
-
-
-      for(var i in user_input) {  //fill commands[] based on user input
-        var string = user_input[i];
-        var is_command = false;
-        var is_shortCommand = false;
-        var skip = false;
-
-        if(thisStringAlreadyDone) { //bugfix
-          thisStringAlreadyDone = false;
-          continue;
-        }
-
-        if(previous.indexOf("t") == 0 && (string.indexOf("l") == 0 || string.indexOf("r") == 0)) {  //bugfix
-          //Prevents conflicts between use of "l" as in takeoff's synonym vs "turn left 310"
-          commands[commands.length-1].push(string + " " + user_input[(parseInt(i)+1).toString()]); //push both arguments to heading() together
-          thisStringAlreadyDone = true; //to we don't attempt to do anything with the next string on the next iteration, because we've just now done it already
-          continue;
-        }
-
-        if (commands.length > 0 && commands[commands.length-1][0] == "altitude" && string.indexOf("e") == 0) {  //expedite option for altitude changes (bugfix)
-          commands[commands.length-1][1] += " " + string; //push both arguments to heading() together
-        }
-
-        if(string.substr(0,2) == "fh") {  //bugfix
-          //Command is a shortkey, eg 'fh270' and not a 'fix sassu'. Will skip detection of 'fix' or 'f' below.
-          is_shortCommand = true;
-          longCmdName = "heading";
-        }
-        else if(!skip) {  //normal logic
-          for(var k in this.COMMANDS) { 
-            if(k == string) {  //input command is a valid command name (eg 'altitude')
-              is_command = true;
-              break;
-            }
-            else if(this.COMMANDS[k].synonyms && this.COMMANDS[k].synonyms.indexOf(string) != -1) {  //input command is a valid command synonym
-              is_command = true;
-              break;
-            }
-            else {  //check for shortKey
-              for(var m in this.COMMANDS[k].shortKey) {
-                if(string.substr(0,1) == this.COMMANDS[k].shortKey[m].substr(0,1)) {  //first character of input command is a command's shortkey)
-                  if(this.COMMANDS[k].shortKey[m].length == 1) { //single character shortKey, matches input command
-                    is_shortCommand = true;
-                    longCmdName = k;
-                    break;
-                  }
-                  else 
-                  {
-                    if(this.COMMANDS[k].shortKey[m].length > 1 && this.COMMANDS[k].shortKey[m] == string.substr(0,this.COMMANDS[k].shortKey[m].length)) { //multi-char shortKey, matches input command
-                      is_shortCommand = true;
-                      longCmdName = k;
-                      break;
-                    }
-                  }
-                }
-              }
-            }
-            if(is_shortCommand) break;
-          }
-          if(!(is_command || is_shortCommand)) {  //string neither command nor shortKey. Must be a command argument.
-            commandArguments += string;
-          }
-        }
-
-        if(is_shortCommand) {
-          commands.push([longCmdName,string]);    //push whole string (it is a full short-command, eg '>350')
-        }
-        else if (is_command) {
-          commands.push([string]);      //push NAME/SYNONYM of command into commands array (eg 't')
-        }
-        else if(commandArguments) {
-          if(commands.length != 0) commands[commands.length-1].push(commandArguments); //append the arguments to previous command
-          commandArguments = "";  //clear out commandArguments
-        }
-        previous = string;
-      }
-      //End of creating 'commands[]'
 
       var response = [];
       var response_end = "";
       var deferred = [];
-      var DEFERRED_COMMANDS = ["takeoff", "to"];
 
       for(var i=0;i<commands.length;i+=1) {
-        var pair    = commands[i];
+        var command = commands[i][0];
+        var args = commands[i].splice(1);
 
-        var command = pair[0];
-        var data    = "";
-
-        if(pair.length == 2) data = pair[1];
-        if(pair.length > 2) {
-          data = pair.splice(1).join(" ");
-        }
-
-        if(DEFERRED_COMMANDS.indexOf(command) == 0) {
-          deferred.push(pair);
+        if (command == 'takeoff') {
+          deferred.push([command, args]);
           continue;
         }
 
-        var retval  = this.run(command, data);
+        var retval  = this.run(command, args);
+
         if(retval) {
           if(!retval[1].hasOwnProperty("log") || !retval[1].hasOwnProperty("say")) {
             retval = [retval[0],{log:retval[1], say:retval[1]}];
@@ -999,19 +1615,16 @@ var Aircraft=Fiber.extend(function() {
       }
 
       for(var i=0;i<deferred.length;i+=1) {
-        var pair    = deferred[i];
+        var command = deferred[i][0];
+        var args = deferred[i][1];
 
-        var command = pair[0];
-        var data    = "";
-        if(pair.length == 2) data = pair[1];
-        var retval  = this.run(command, data);
+        var retval  = this.run(command, args);
         if(retval) {
           if(retval[1].length != null) { // true if array, and not log/say object
             retval[1] = {say:retval[1], log:retval[1]};  // make into log/say object
           }
-            response.push(retval[1]);
+          response.push(retval[1]);
         }
-
       }
 
       if(commands.length == 0) {
@@ -1037,103 +1650,117 @@ var Aircraft=Fiber.extend(function() {
       var call_func;
 
       if (this.COMMANDS[command]) {
-        call_func = this.COMMANDS[command].func;
-      }
-      else {
-        $.each(this.COMMANDS, function(k, v) {
-          if (v.synonyms && v.synonyms.indexOf(command) != -1) { call_func = v.func; }
-        });
+        call_func = this.COMMANDS[command];
       }
 
-      if (!call_func) 
+      if (!call_func)
         return ["fail", "not understood"];
 
       return this[call_func].apply(this, [data]);
     },
     runHeading: function(data) {
-      var split     = data.split(" ");
-      var heading = null;
-      var direction = null;
+      var direction = data[0];
+      var heading = data[1];
+      var incremental = data[2];
+
       var instruction = null;
-      switch(split.length) {  //number of elements in 'data'
-        case 1: 
-          if(isNaN(parseInt(split))) {  //probably using shortKeys
-            if(split[0][0] == "\u2BA2") { //using '<250' format
-              direction = "left";
-              heading = split[0].substr(1); //remove shortKey
-            }
-            else if (split[0][0] == "\u2BA3") {  //using '>250' format
-              direction = "right";
-              heading = split[0].substr(1); //remove shortKey
-            }
-            else if(split[0].substr(0,2).toLowerCase() == "fh") { //using 'fh250' format
-              heading = split[0].substr(2); //remove shortKey
-            }
-            else {  //input is invalid
-              return ["fail", "heading not understood"];
-            }
-          }
-          else {  //using 'turn 250' format (no direction specified)
-            heading = parseInt(split);
-          }
-          break;
-
-        case 2: //using 'turn r 250' format
-          if(split[0] === "l") direction = "left";
-          else if (split[0] === "r" ) direction = "right";
-          heading = parseInt(split[1]);
-          break;
-
-        default:  //input formatted incorrectly
-          return ["fail", "heading not understood"];
-          break;
-      }
+      var amount = 0;
 
       if(isNaN(heading)) return ["fail", "heading not understood"];
 
-      //Stop doing what you're doing
-      if(this.fms.currentWaypoint().navmode == "rwy")
-        this.cancelLanding();
-      this.cancelFix();
+      if (incremental) {
+        amount = heading;
+        if(direction == "left") {
+          heading = degrees(this.heading) - amount;
+        }
+        else if(direction == "right") {
+          heading = degrees(this.heading) + amount;
+        }
+      }
 
-      this.fms.setCurrent({
-        navmode: "heading",
-        heading: radians(heading),
-        turn: direction,
-        hold: false,
-      });
+      // Update the FMS
+      var wp = this.fms.currentWaypoint();
+      var leg = this.fms.currentLeg();
+      var f = this.fms.following;
+      if(wp.navmode == "rwy") this.cancelLanding();
+      if(['heading'].indexOf(wp.navmode) > -1) { // already being vectored or holding. Will now just change the assigned heading.
+        this.fms.setCurrent({
+          altitude: wp.altitude,
+          navmode: "heading",
+          heading: radians(heading),
+          speed: wp.speed,
+          turn:direction,
+          hold:false
+        });
+      }
+      else if(['hold'].indexOf(wp.navmode) > -1) {  // in hold. Should leave the hold, and add leg for vectors
+        var index = this.fms.current[0] + 1;
+        this.fms.insertLeg({firstIndex:index, waypoints:[new zlsa.atc.Waypoint({  // add new Leg after hold leg
+          altitude: wp.altitude,
+          navmode: "heading",
+          heading: radians(heading),
+          speed: wp.speed,
+          turn:direction,
+          hold:false
+        },this.fms)]});
+        this.fms.nextWaypoint();  // move from hold leg to vector leg.
+      }
+      else if(f.sid || f.star || f.awy) {
+        leg.waypoints.splice(this.fms.current[1] , 0, // insert wp with heading at current position within the already active leg
+          new zlsa.atc.Waypoint({
+            altitude: wp.altitude,
+            navmode: "heading",
+            heading: radians(heading),
+            speed: wp.speed,
+            turn: direction,
+            hold: false,
+          },this.fms)
+        );
+      }
+      else if(leg.route != "[radar vectors]") { // needs new leg added
+        if(this.fms.atLastWaypoint()) {
+          this.fms.appendLeg({waypoints:[new zlsa.atc.Waypoint({
+            altitude: wp.altitude,
+            navmode: "heading",
+            heading: radians(heading),
+            speed: wp.speed,
+            turn:direction,
+            hold:false
+          },this.fms)]});
+          this.fms.nextLeg();
+        }
+        else {
+          this.fms.insertLegHere({waypoints:[new zlsa.atc.Waypoint({
+            altitude: wp.altitude,
+            navmode: "heading",
+            heading: radians(heading),
+            speed: wp.speed,
+            turn:direction,
+            hold:false
+          },this.fms)]});
+        }
+      }
+      wp = this.fms.currentWaypoint();  // update 'wp'
 
+      // Construct the readback
       if(direction) instruction = "turn " + direction + " heading ";
       else instruction = "fly heading ";
-
-      var readback = {
-        log: instruction + heading_to_string(this.fms.currentWaypoint().heading),
-        say: instruction + radio_heading(heading_to_string(this.fms.currentWaypoint().heading))
-      };
+      if(incremental)
+        var readback = {
+          log: "turn " + amount + " degrees " + direction,
+          say: "turn " + groupNumbers(amount) + " degrees " + direction};
+      else var readback = {
+          log: instruction + heading_to_string(wp.heading),
+          say: instruction + radio_heading(heading_to_string(wp.heading))};
       return ['ok', readback];
     },
     runAltitude: function(data) {
-      if(data[0] == "\u2B61" || data[0] == "\u2B63") {  //shortKey 'v' or '^' in use
-        data = data.substr(1);  //remove shortKey
-      }
+      var altitude = data[0];
+      var expedite = data[1];
 
-      var split     = data.split(" ");
-      var altitude = parseInt(split[0]);
-      var expedite = false;
-      data = split[0];
-
-      function isExpedite(s) {
-        if((s.length >= 1 && "expedite".indexOf(s) == 0) || s == "x") return true;
-        return false;
-      }
-
-      if(split.length >= 2 && isExpedite(split[1])) {
-        expedite = true;
-      }
-
-      if(isNaN(altitude)) {
-        if(isExpedite(split[0])) {
-          this.setCurrent({expedite: true});
+      if ((altitude == null) || isNaN(altitude)) {
+        if (expedite) {
+          this.fms.setCurrent({expedite: true});
           return ['ok', radio_trend('altitude', this.altitude, this.fms.currentWaypoint().altitude) + " " + this.fms.currentWaypoint().altitude + ' expedite'];
         }
         return ["fail", "altitude not understood"];
@@ -1146,10 +1773,8 @@ var Aircraft=Fiber.extend(function() {
       if (prop.game.option.get('softCeiling') == 'yes')
         ceiling += 1000;
 
-      altitude *= 100;
-
       this.fms.setAll({
-        altitude: clamp(1000, altitude, ceiling),
+        altitude: clamp(round(airport_get().elevation/100)*100 + 1000, altitude, ceiling),
         expedite: expedite,
       })
 
@@ -1162,12 +1787,35 @@ var Aircraft=Fiber.extend(function() {
       };
       return ['ok', readback];
     },
-    runSpeed: function(data) {
-      if(data[0] == "+" || data[0] == "-") {  //shortKey '+' or '-' in use
-        data = data.substr(1);  //remove shortKey
+    runClearedAsFiled: function() {
+      if(this.fms.clearedAsFiled()) {
+        return ['ok',
+          {log: "cleared to destination via the " + airport_get().sids[this.destination].icao +
+            " departure, then as filed" + ". Climb and maintain " + airport_get().initial_alt +
+            ", expect " + this.fms.fp.altitude + " 10 minutes after departure",
+          say: "cleared to destination via the " + airport_get().sids[this.destination].name +
+            " departure, then as filed" + ". Climb and maintain " + radio_altitude(
+            airport_get().initial_alt) + ", expect " + radio_altitude(this.fms.fp.altitude) +
+            "," + radio_spellOut(" 10 ") + "minutes after departure"}];
       }
+      else return [true, "unable to clear as filed"];
+    },
+    runClimbViaSID: function() {
+      if(!(this.fms.currentLeg().type == "sid")) var fail = true;
+      else if(this.fms.climbViaSID())
+        return ['ok', {log: "climb via the " + this.fms.currentLeg().route.split('.')[1] + " departure",
+          say: "climb via the " + airport_get().sids[this.fms.currentLeg().route.split('.')[1]].name + " departure"}];
 
-      var speed = parseInt(data);
+      if(fail) ui_log(true, this.getCallsign() + ", unable to climb via SID");
+    },
+    runDescendViaSTAR: function() {
+      if(this.fms.descendViaSTAR() && this.fms.following.star)
+      return ['ok', {log: "descend via the " + this.fms.following.star + " arrival",
+        say: "descend via the " + airport_get().stars[this.fms.following.star].name + " arrival"}];
+      else ui_log(true, this.getCallsign() + ", unable to descend via STAR");
+    },
+    runSpeed: function(data) {
+      var speed = data[0];
       if(isNaN(speed)) return ["fail", "speed not understood"];
 
       this.fms.setAll({speed: clamp(this.model.speed.min,
@@ -1180,227 +1828,302 @@ var Aircraft=Fiber.extend(function() {
       return ["ok", readback];
     },
     runHold: function(data) {
-      var turn = '';
-      if("left".indexOf(data) == 0 && data.length >= 1) turn = "left";
-      else if("right".indexOf(data) == 0 && data.length >= 1) turn = "right";
-      else return ["fail", "hold direction not understood"];
+      var dirTurns = data[0];
+      var legLength = data[1];
+      var holdFix = data[2];
+      var holdFixLocation = null;
 
-      this.fms.setCurrent({
-        navmode: 'hold',
-        turn: turn,
-      });
+      if (dirTurns == null)
+        dirTurns = "right"; // standard for holding patterns is right-turns
 
-      this.cancelFix();
-      if(this.fms.currentWaypoint().navmode == "rwy")
-        this.cancelLanding();
+      if (legLength == null)
+        legLength = "1min";
 
-      if(this.isTakeoff())
-        return ["ok", "after departure, will circle towards the " + this.fms.currentWaypoint().turn];
+      if (holdFix != null) {
+        holdFix = holdFix.toUpperCase();
+        holdFixLocation = airport_get().getFix(holdFix);
+        if (!holdFixLocation) {
+          return ["fail", "unable to find fix " + holdFix];
+        }
+      }
 
-      return ["ok", "circling towards the " + this.fms.currentWaypoint().turn + " at " + this.fms.currentWaypoint().altitude + " feet"];
+      if(this.isTakeoff() && !holdFix) return ["fail", "where do you want us to hold?"];
+
+      // Determine whether or not to enter the hold from present position
+      if(holdFix) {  // holding over a specific fix (currently only able to do so on inbound course)
+        var inboundHdg = vradial(vsub(this.position, holdFixLocation));
+        if(holdFix != this.fms.currentWaypoint().fix) {  // not yet headed to the hold fix
+          this.fms.insertLegHere({type:"fix", route: "[GPS/RNAV]", waypoints:[
+            new zlsa.atc.Waypoint({ // proceed direct to holding fix
+              fix: holdFix,
+              altitude: this.fms.currentWaypoint().altitude,
+              speed: this.fms.currentWaypoint().speed
+            },this.fms),
+            new zlsa.atc.Waypoint({ // then enter the hold
+              navmode:"hold",
+              speed: this.fms.currentWaypoint().speed,
+              altitude: this.fms.currentWaypoint().altitude,
+              fix: null,
+              hold: {
+                fixName: holdFix,
+                fixPos: holdFixLocation,
+                dirTurns: dirTurns,
+                legLength: legLength,
+                inboundHdg: inboundHdg,
+                timer: null,
+              }
+            },this.fms)
+          ]});
+        }
+        else {  // already currently going to the hold fix
+          this.fms.appendWaypoint({
+            navmode:"hold",
+            speed: this.fms.currentWaypoint().speed,
+            altitude: this.fms.currentWaypoint().altitude,
+            fix: null,
+            hold: {
+              fixName: holdFix,
+              fixPos: holdFixLocation,
+              dirTurns: dirTurns,
+              legLength: legLength,
+              inboundHdg: inboundHdg,
+              timer: null, }});  // Force the initial turn to outbound heading when entering the hold
+        }
+      }
+      else {  // holding over present position (currently only able to do so on present course)
+        holdFixLocation = this.position; // make a/c hold over their present position
+        var inboundHdg = this.heading;
+        this.fms.insertLegHere({type:"fix", waypoints:[
+          { // document the present position as the "fix" we're holding over
+            navmode:"fix",
+            fix: "[custom]",
+            location: holdFixLocation,
+            altitude: this.fms.currentWaypoint().altitude,
+            speed: this.fms.currentWaypoint().speed
+          },
+          { // Force the initial turn to outbound heading when entering the hold
+            navmode:"hold",
+            speed: this.fms.currentWaypoint().speed,
+            altitude: this.fms.currentWaypoint().altitude,
+            fix: null,
+            hold: {
+              fixName: holdFix,
+              fixPos: holdFixLocation,
+              dirTurns: dirTurns,
+              legLength: legLength,
+              inboundHdg: inboundHdg,
+              timer: null,
+            }
+          }
+        ]});
+      }
+
+      var inboundDir = radio_cardinalDir_names[getCardinalDirection(fix_angle(inboundHdg + Math.PI)).toLowerCase()];
+      if(holdFix) return ["ok", "proceed direct " + holdFix + " and hold inbound, " + dirTurns + " turns, " + legLength + " legs"];
+      else return ["ok", "hold " + inboundDir + " of present position, " + dirTurns + " turns, " + legLength + " legs"];
     },
     runDirect: function(data) {
-      if(data.length == 0) {
-        return ["fail", "say again the fix name?"];
+      var fixname = data[0].toUpperCase();
+      var fix = airport_get().getFix(fixname);
+      if (!fix) return ["fail", "unable to find fix called " + fixname];
+
+      if(this.mode == "takeoff") {  // remove intermediate fixes
+        this.fms.skipToFix(fixname);
       }
-
-      var fixname = data.toUpperCase(),
-          fix = airport_get().getFix(fixname);
-
-      if (!fix) {
-        return ["fail", "unable to find fix called " + fixname];
-      }
-
-      // can issue this command if not in fix mode, then will run exactly as with "fix"
-      // or with multiple fixes, then the sequence is rewritten
-      if (this.fms.currentWaypoint().navmode != "fix" || fixname.indexOf(' ').length > 0) {
-        return this.runFix(data);
-      }
-
-      var fix_pos = this.fms.skipToWaypoint(fixname);
-      if (fix_pos == -1) {
-        return ["fail", "unable to go to " + fixname];
-      }
-
-      if (fix_pos == 0) {
-        return ["fail", "already going direct " + fixname];
+      else {
+        if (!this.fms.skipToFix(fixname))
+          return ["fail", fixname + ' is not in our flightplan'];
       }
 
       return ["ok", "proceed direct " + fixname];
     },
     runFix: function(data) {
-      if(data[0] == ".") { //shortkey '.' in use
-        data = data.substr(1);  //remove shortKey
-      }
-      if(data.length == 0) {
-        return ["fail", "say again the fix name?"];
-      }
-
-      data = data.toUpperCase().split(/\s+/);
-      
-      var last_fix, fail,  
-          fixes = $.map(data, function(fixname) {
+      var last_fix, fail;
+      var fixes = $.map(data[0], function(fixname) {
             var fix = airport_get().getFix(fixname);
             if(!fix) {
               fail = ["fail", "unable to find fix called " + fixname];
               return;
             }
-            
+
             // to avoid repetition, compare name with the previous fix
             if (fixname == last_fix) return;
             last_fix = fixname;
             return fixname;
-          });
+      });
 
       if (fail) return fail;
 
-      this.cancelFix();
-      if(this.mode != "waiting" && this.mode != "takeoff" && this.mode != "apron" && this.mode != "taxi"){
+      for(var i=fixes.length-1; i>=0; i--) {
+        this.fms.insertLegHere({type:"fix", route:fixes[i]})
+      }
+
+      if (this.mode != "waiting" && this.mode != "takeoff" && this.mode != "apron" && this.mode != "taxi"){
         this.cancelLanding();
       }
-
-      this.fms.setFixes(fixes);
-
       return ["ok", "proceed direct " + fixes.join(', ')];
     },
+    runFlyPresentHeading: function(data) {
+      this.cancelFix();
+      this.runHeading([null, degrees(this.heading)]);
+      return ["ok", "fly present heading"];
+    },
+    runSayRoute: function(data) {
+      return ['ok', {log:'route: ' + this.fms.fp.route.join(' '), say:"here's our route"}];
+    },
     runSID: function(data) {
+      var apt = airport_get();
+      var sid_id = data[0].toUpperCase();
+      if(!apt.sids.hasOwnProperty(sid_id)) return;
+      var sid_name = apt.sids[sid_id].name;
+      var exit = apt.getSIDExitPoint(sid_id);
+      var route = apt.icao + '.' + sid_id + '.' + exit;
+
       if(this.category != "departure") {
-        return ["fail", "inbound"];
+        return ["fail", "unable to fly SID, we are an inbound"];
       }
-      if(data.length == 0) {
+      if(data[0].length == 0) {
         return ["fail", "SID name not understood"];
       }
-      
-      var sid_name = data.toUpperCase(),
-          fixes = airport_get().getSID(sid_name);
-      
-      if(!fixes) {
-        return ["fail", "no SID found with name of " + sid_name];
+      if(!apt.sids.hasOwnProperty(sid_id)) {
+        return ["fail", "SID name not understood"];
       }
-      
-      this.cancelFix();
-      this.fms.setFixes(fixes);
+      if(!this.rwy_dep) this.setDepartureRunway(airport_get().runway);
+      if(!apt.sids[sid_id].rwy.hasOwnProperty(this.rwy_dep)) {
+        return ['fail', "unable, the "+sid_name+" departure not valid from Runway "+this.rwy_dep];
+      }
 
-      return ["ok", {log: "cleared to destination via "+sid_name, say:"cleared to dest inay shin via "+sid_name}];
+
+      this.fms.followSID(route);
+
+      return ["ok", {log:"cleared to destination via the " + sid_id + " departure, then as filed",
+                  say:"cleared to destination via the " + sid_name + " departure, then as filed"}];
     },
-    runProceed: function(data) {
-      var lastWaypoint = this.fms.waypoints[this.fms.waypoints.length - 1];
-      if (this.fms.currentWaypoint().navmode != "fix") {
-        return ["fail", "not navigating to any fix"];
+    runSTAR: function(data) {
+      var entry = data[0].split('.')[0].toUpperCase();
+      var star_id = data[0].split('.')[1].toUpperCase();
+      var apt = airport_get();
+      var star_name = apt.stars[star_id].name;
+      var route = entry + '.' + star_id + '.' + apt.icao;
+
+      if(this.category != "arrival") {
+        return ["fail", "unable to fly STAR, we are a departure!"];
+      }
+      if(data[0].length == 0) {
+        return ["fail", "STAR name not understood"];
+      }
+      if(!apt.stars.hasOwnProperty(star_id)) {
+        return ["fail", "STAR name not understood"];
       }
 
-      if(data.length == 0) {
-        return ["fail", "fix name not understood"];
-      }
+      this.fms.followSTAR(route);
 
-      data = data.toUpperCase().split(/\s+/);
-      for (var i=0; i<data.length; i++) {
-        if (this.fms.hasWaypoint(data[i])) {
-          return ["fail", "already navigating to " + data[i]];
-        }
-      }
-
-      for (var i=0; i<data.length; i++) {
-        if (!airport_get().getFix(data[i])) {
-          return ["fail", "unable to find fix " + data[i]];
-        }
-      }
-
-      for (var i=0; i<data.length; i++) {
-        this.fms.addWaypoint({
-          name: data[i],
-          navmode: 'fix',
-          location: airport_get().getFix(data[i]),
-        });
-      }
-
-      return ["ok", "cleared to proceed to "
-          + data.join(' ') + " after " + lastWaypoint.name];
+      return ["ok", {log:"cleared to the " + apt.name + " via the " + star_id + " arrival",
+                  say:"cleared to the " + apt.name + " via the " + star_name + " arrival"}];
     },
-    runWait: function(data) {
+    runMoveDataBlock: function(dir) {
+      var positions = {8:360,9:45,6:90,3:135,2:180,1:225,4:270,7:315,5:"ctr"};
+      if(!positions.hasOwnProperty(dir[0])) return;
+      else this.datablockDir = positions[dir[0]];
+    },
+    /** Adds a new Leg to fms with a user specified route
+     ** Note: See notes on 'runReroute' for how to format input for this command
+     */
+    runRoute: function(data) {
+      data = data[0].toUpperCase();  // capitalize everything
+      var worked = true;
+      var route = this.fms.formatRoute(data);
+      if(worked && route) worked = this.fms.customRoute(route, false);  // Add to fms
+      if(!route || !data || data.indexOf(" ") > -1) worked = false;
+
+      // Build the response
+      if(worked) return ['ok', {log:'rerouting to :' + this.fms.fp.route.join(' '),say:"rerouting as requested"}];
+      else return ['fail', {log:'your route "' + data + '" is invalid!', say:'that route is invalid!'}];
+    },
+    /** Removes all legs, and replaces them with the specified route
+     ** Note: Input data needs to be provided with single dots connecting all
+     ** procedurally-linked points (eg KSFO.OFFSH9.SXC or SGD.V87.MOVER), and
+     ** all other points that will be simply a fix direct to another fix need
+     ** to be connected with double-dots (eg HLI..SQS..BERRA..JAN..KJAN)
+     */
+    runReroute: function(data) {
+      data = data[0].toUpperCase();  // capitalize everything
+      var worked = true;
+      var route = this.fms.formatRoute(data);
+      if(worked && route) worked = this.fms.customRoute(route, true);  // Reset fms
+      if(!route || !data || data.indexOf(" ") > -1) worked = false;
+
+      // Build the response
+      if(worked) return ['ok', {log:'rerouting to: ' + this.fms.fp.route.join(' '),say:"rerouting as requested"}];
+      else return ['fail', {log:'your route "' + data + '" is invalid!', say:'that route is invalid!'}];
+    },
+    runTaxi: function(data) {
       if(this.category != "departure") return ["fail", "inbound"];
-
-      if(this.mode == "taxi") return ["fail", "already taxiing to " + radio_runway(this.fms.currentWaypoint().runway)];
-
+      if(this.mode == "taxi") return ["fail", "already taxiing to " + radio_runway(this.rwy_dep)];
       if(this.mode == "waiting") return ["fail", "already waiting"];
-
       if(this.mode != "apron") return ["fail", "wrong mode"];
 
-      if(data) {
-        if(!airport_get().getRunway(data.toUpperCase())) return ["fail", "no runway " + data.toUpperCase()];
-        this.selectRunway(data);
+      // Set the runway to taxi to
+      if(data[0]) {
+        if(airport_get().getRunway(data[0].toUpperCase())) this.setDepartureRunway(data[0].toUpperCase());
+        else return ["fail", "no runway " + data[0].toUpperCase()];
       }
 
-      var runway = airport_get().getRunway(this.fms.currentWaypoint().runway);
-
-      runway.addQueue(this, this.fms.currentWaypoint().runway);
-
-      this.mode = "taxi";
+      // Start the taxi
       this.taxi_start = game_time();
+      var runway = airport_get().getRunway(this.rwy_dep);
+      runway.addQueue(this);
+      this.mode = "taxi";
 
       var readback = {
-        log: "taxi to runway " + this.fms.currentWaypoint().runway,
-        say: "taxi to runway " + radio_runway(this.fms.currentWaypoint().runway)
+        log: "taxi to runway " + runway.name,
+        say: "taxi to runway " + radio_runway(runway.name)
       };
       return ["ok", readback];
     },
-    
     runTakeoff: function(data) {
       if(this.category != "departure") return ["fail", "inbound"];
 
       if(!this.isLanded()) return ["fail", "already airborne"];
       if(this.mode =="apron") return ["fail", "unable, we're still in the parking area"];
-      if(this.mode == "taxi") return ["fail", "taxi to runway " + radio_runway(this.fms.currentWaypoint().runway) + " not yet complete"];
+      if(this.mode == "taxi") return ["fail", "taxi to runway " + radio_runway(this.rwy_dep) + " not yet complete"];
+      if(this.mode == "takeoff") return ["fail", "already taking off"];
 
       if(this.fms.currentWaypoint().altitude <= 0) return ["fail", "no altitude assigned"];
 
-      var runway = airport_get().getRunway(this.fms.currentWaypoint().runway);
+      var runway = airport_get().getRunway(this.rwy_dep);
 
-      if(runway.removeQueue(this, this.fms.currentWaypoint().runway)) {
+      if(runway.removeQueue(this)) {
         this.mode = "takeoff";
         prop.game.score.windy_takeoff += this.scoreWind('taking off');
         this.takeoffTime = game_time();
 
-        if(this.fms.currentWaypoint().heading == null)
-          this.fms.setCurrent({heading: runway.getAngle(this.fms.currentWaypoint().runway)});
-        //
+        if(this.fms.currentWaypoint().speed == null)
+          this.fms.setCurrent({speed: this.model.speed.cruise});
+
         var wind = airport_get().getWind();
         var wind_dir = round(degrees(wind.angle));
         var readback = {
-          log: "wind " + round(wind_dir/10)*10 + " at " + round(wind.speed) + ", runway " + this.fms.currentWaypoint().runway + ", cleared for takeoff",
-          say: "wynd " + radio_spellOut(round(wind_dir/10)*10) + " at " + radio_spellOut(round(wind.speed)) + ", run way " + radio_runway(this.fms.currentWaypoint().runway) + ", cleared for take off",
+          log: "wind " + round(wind_dir/10)*10 + " at " + round(wind.speed) + ", runway " + this.rwy_dep + ", cleared for takeoff",
+          say: "wynd " + radio_spellOut(round(wind_dir/10)*10) + " at " + radio_spellOut(round(wind.speed)) + ", run way " + radio_runway(this.rwy_dep) + ", cleared for take off",
         };
         return ["ok", readback];
       } else {
-        var waiting = runway.isWaiting(this, this.fms.currentWaypoint().runway);
-        return ["fail", "number "+waiting+" behind "+runway.waiting[runway.getEnd(this.fms.currentWaypoint().runway)][waiting-1].getRadioCallsign(), ""];
+        var waiting = runway.inQueue(this);
+        return ["fail", "number "+waiting+" behind "+runway.queue[waiting-1].getRadioCallsign(), ""];
       }
-
     },
     runLanding: function(data) {
-      if(data[0] == "\u2B50") { //shortkey '*' in use
-        data = data.substr(1);  //remove shortKey
-      }
+      var variant = data[0];
+      var runway = airport_get().getRunway(data[1]);
 
-      var runway = airport_get().getRunway(data);
-      if(!runway) {
-        if(!data) return ["fail", "runway not understood"];
-        else      return ["fail", "there is no runway " + radio_runway(data)];
-      }
+      if(!runway) return ["fail", "there is no runway " + radio_runway(data[1])];
+      else this.setArrivalRunway(data[1].toUpperCase());
 
-      if(this.fms.currentWaypoint().runway == data.toUpperCase()) {
-        return ["fail", "already landing on runway " + radio_runway(data)];
-      }
-      this.cancelFix();
-      this.fms.setCurrent({
-        navmode: "rwy",
-        runway: data.toUpperCase(),
-        turn: null,
-        start_speed: this.speed,
-      });
+      this.fms.followApproach("ils", this.rwy_arr, variant); // tell fms to follow ILS approach
 
-      var readback = {log:"cleared ILS runway " + this.fms.currentWaypoint().runway + " approach",
-                      say:"cleared ILS runway " + radio_runway(this.fms.currentWaypoint().runway) + " approach"};
+      var readback = {log:"cleared ILS runway " + this.rwy_arr + " approach",
+                      say:"cleared ILS runway " + radio_runway(this.rwy_arr) + " approach"};
       return ["ok", readback];
     },
     runAbort: function(data) {
@@ -1434,23 +2157,24 @@ var Aircraft=Fiber.extend(function() {
       } else { //modes "apron", "takeoff", ("cruise" for some navmodes)
         return ["fail", "unable to abort"];
       }
-
     },
-    runDebug: function(data) {
-      if(data == "log") {
-        window.aircraft = this;
-        return ["ok", {log:"in the console, look at the variable &lsquo;aircraft&rsquo;", say:""}];
-      }
+    runDebug: function() {
+      window.aircraft = this;
+      return ["ok", {log:"in the console, look at the variable &lsquo;aircraft&rsquo;", say:""}];
+    },
+    runDelete: function() {
+      aircraft_remove(this);
     },
     cancelFix: function() {
       if(this.fms.currentWaypoint().navmode == "fix") {
-        this.fms.setCurrent({
-          name: "undefined",
+        var curr = this.fms.currentWaypoint();
+        this.fms.appendLeg({
+          altitude: curr.altitude,
           navmode: 'heading',
           heading: this.heading,
-          location: null,
+          speed: curr.speed
         });
-        this.fms.removeWaypoints();
+        this.fms.nextLeg();
         this.updateStrip();
         return true;
       }
@@ -1458,11 +2182,11 @@ var Aircraft=Fiber.extend(function() {
     },
     cancelLanding: function() {
       if(this.fms.currentWaypoint().navmode == "rwy") {
-        var runway = airport_get().getRunway(this.fms.currentWaypoint().runway);
+        var runway = airport_get().getRunway(this.rwy_arr);
         if(this.mode == "landing") {
           this.fms.setCurrent({
             altitude: Math.max(2000, round((this.altitude / 1000)) * 1000),
-            heading: runway.getAngle(this.fms.currentWaypoint().runway),
+            heading: runway.angle,
           });
         }
 
@@ -1479,41 +2203,33 @@ var Aircraft=Fiber.extend(function() {
       }
     },
     parse: function(data) {
-      var keys = 'position model airline callsign category heading altitude destination'.split(' ');
+      var keys = 'position model airline callsign category heading altitude speed'.split(' ');
       for (var i in keys) {
         if (data[keys[i]]) this[keys[i]] = data[keys[i]];
       }
-
-      if(data.speed) this.speed = data.speed;
+      if(this.category == "arrival") {
+        if(data.waypoints.length > 0)
+          this.setArrivalWaypoints(data.waypoints);
+        this.destination = data.destination;
+        this.setArrivalRunway(airport_get(this.destination).runway);
+      }
+      else if(this.category == "departure" && this.isLanded()) {
+        this.speed = 0;
+        this.mode = "apron";
+        this.setDepartureRunway(airport_get().runway);
+        this.destination = data.destination;
+      }
 
       if(data.heading)  this.fms.setCurrent({heading: data.heading});
       if(data.altitude) this.fms.setCurrent({altitude: data.altitude});
       this.fms.setCurrent({speed: data.speed || this.model.speed.cruise});
-
-      if (data.waypoints && data.waypoints.length > 0)
-        this.setArrivalWaypoints(data.waypoints);
-
-      if(this.category == "departure" && this.isLanded()) {
-        this.speed = 0;
-        this.mode = "apron";
+      if(data.route) {
+        this.fms.customRoute(this.fms.formatRoute(data.route), true);
+        this.fms.descendViaSTAR();
       }
-
-    },
-    complete: function(data) {
-      if(this.category == "departure" && this.isLanded()) {
-        this.selectRunway();
+      if(data.nextFix) {
+        this.fms.skipToFix(data.nextFix);
       }
-      this.updateStrip();
-    },
-    selectRunway: function(runway) {
-      if(!runway) {
-        runway = airport_get().selectRunway(this.model.runway.takeoff).toUpperCase();
-        if(!runway) return;
-      }
-      this.fms.setCurrent({runway: runway.toUpperCase()});
-
-      this.taxi_delay = airport_get().getRunway(this.fms.currentWaypoint().runway).taxiDelay(this.fms.currentWaypoint().runway);
-      this.updateStrip();
     },
     pushHistory: function() {
       this.history.push([this.position[0], this.position[1]]);
@@ -1524,12 +2240,10 @@ var Aircraft=Fiber.extend(function() {
     moveForward: function() {
       this.mode = "taxi";
       this.taxi_next  = true;
-      this.taxi_delay = 60;
-      this.taxi_start = game_time();
     },
 
     /**
-     * aircraft is stable on the approach centerline
+     ** Aircraft is established on FINAL APPROACH COURSE
      */
     isEstablished: function() {
       if (this.mode != "landing")
@@ -1537,9 +2251,26 @@ var Aircraft=Fiber.extend(function() {
       return (this.approachOffset <= 0.048); // 160 feet or 48 meters
     },
 
+    /**
+     ** Aircraft is on the ground (can be a departure OR arrival)
+     */
     isLanded: function() {
-      if(this.altitude < 5) return true;
+      var runway  = airport_get().getRunway(this.rwy_arr);
+      if (runway == null) {
+        runway  = airport_get().getRunway(this.rwy_dep);
+      }
+
+      if (runway == null) {
+        return false;
+      }
+      if((this.altitude - runway.elevation) < 5)
+        return true;
+      return false;
     },
+
+    /**
+     ** Aircraft is actively following an instrument approach
+     */
     isPrecisionGuided: function() {
       // Whether this aircraft is elegible for reduced separation
       //
@@ -1568,24 +2299,22 @@ var Aircraft=Fiber.extend(function() {
       return false;
     },
     isVisible: function() {
-      if(this.mode == "landing" || this.mode == "cruise") return true;
-      if(!this.fms.currentWaypoint().runway) return false;
-      var runway = airport_get().getRunway(this.fms.currentWaypoint().runway);
-      var waiting = runway.isWaiting(this, this.fms.currentWaypoint().runway);
-      if(this.isTaxiing()) {
-        if(this.mode == "waiting" && waiting == 0)
-          return true;
-        return false;
+      if(this.mode == "apron" || this.mode == "taxi") return false; // hide aircraft on twys
+      else if(this.isTaxiing()) { // show only the first aircraft in the takeoff queue
+        var runway = airport_get().getRunway(this.rwy_dep);
+        var waiting = runway.inQueue(this);
+        if(this.mode == "waiting" && waiting == 0) return true;
+        else return false;
       }
-      return true;
+      else return true;
     },
     getWind: function() {
-      if (!this.fms.currentWaypoint().runway) return {cross: 0, head: 0};
+      if (!this.rwy_dep) return {cross: 0, head: 0};
       var airport = airport_get();
       var wind    = airport.wind;
-      var runway  = airport.getRunway(this.fms.currentWaypoint().runway);
+      var runway  = airport.getRunway(this.rwy_dep);
 
-      var angle   =  abs(angle_offset(runway.getAngle(this.fms.currentWaypoint().runway), wind.angle));
+      var angle   =  abs(angle_offset(runway.angle, wind.angle));
 
       return {
         cross: Math.sin(angle) * wind.speed,
@@ -1594,29 +2323,34 @@ var Aircraft=Fiber.extend(function() {
     },
     radioCall: function(msg, sectorType, alert) {
       if (this.projected) return;
-      var call = airport_get().radio[sectorType] + ", " +
-        this.callsign + " " +msg;
+      var call = "",
+        callsign_L = this.getCallsign(),
+        callsign_S = this.getRadioCallsign();
+      if(sectorType) call += airport_get().radio[sectorType];
+      // call += ", " + this.getCallsign() + " " + msg;
       if (alert)
-        ui_log(true, call);
+        ui_log(true, airport_get().radio[sectorType] + ", " + callsign_L + " " + msg);
       else
-        ui_log(call);
+        ui_log(airport_get().radio[sectorType] + ", " + callsign_L + " " + msg);
+      speech_say([{type:"text", content:(airport_get().radio[sectorType] + ", " + callsign_S + " " + msg)}]);
     },
     callUp: function() {
       if(this.category == "arrival") {
         var altdiff = this.altitude - this.fms.currentWaypoint().altitude;
+        var alt = digits_decimal(this.altitude, -2);
         if(Math.abs(altdiff) > 200) {
           if(altdiff > 0) {
-            var alt_log = "descending through " + this.altitude + " for " + this.requested.altitude;
-            var alt_say = "descending through " + radio_altitude(this.altitude) + " for " + radio_altitude(this.requested.altitude);
+            var alt_log = "descending through " + alt + " for " + this.target.altitude;
+            var alt_say = "descending through " + radio_altitude(alt) + " for " + radio_altitude(this.target.altitude);
           }
           else if(altdiff < 0) {
-            var alt_log = " climbing through " + this.altitude + " for " + this.requested.altitude;
-            var alt_say = " climbing through " + radio_altitude(this.altitude) + " for " + radio_altitude(this.requested.altitude);
+            var alt_log = " climbing through " + alt + " for " + this.target.altitude;
+            var alt_say = " climbing through " + radio_altitude(alt) + " for " + radio_altitude(this.target.altitude);
           }
         }
         else {
-          var alt_log = "at " + this.altitude;
-          var alt_say = "at " + radio_altitude(this.altitude);
+          var alt_log = "at " + alt;
+          var alt_say = "at " + radio_altitude(alt);
         }
         ui_log(airport_get().radio.app + ", " + this.getCallsign() + " with you " + alt_log);
         speech_say([ {type:"text", content:airport_get().radio.app+", "}, {type:"callsign", content:this}, {type:"text", content:"with you " + alt_say} ]);
@@ -1650,92 +2384,84 @@ var Aircraft=Fiber.extend(function() {
     },
     showStrip: function() {
       this.html.detach();
-      $("#strips").append(this.html);
-      this.html.show(600);
+      // var scrollPos = $("#strips")[0].scrollHeight - $("#strips").scrollTop();
+      var scrollPos = $("#strips").scrollTop();
+      $("#strips").prepend(this.html);
+      this.html.show();
+      $("#strips").scrollTop(scrollPos + 45);  // shift scroll down one strip's height
     },
     updateTarget: function() {
       var airport = airport_get();
       var runway  = null;
-
       var offset = null;
-
       var offset_angle = null;
-
       var glideslope_altitude = null;
       var glideslope_window   = null;
-
       var angle = null;
+      var runway_elevation = 0;
+
+      if (this.rwy_arr != null)
+        runway_elevation = airport.getRunway(this.rwy_arr).elevation;
 
       if(this.fms.currentWaypoint().altitude > 0)
         this.fms.setCurrent({altitude: Math.max(1000,
                                                 this.fms.currentWaypoint().altitude)});
-
       if(this.fms.currentWaypoint().navmode == "rwy") {
         airport = airport_get();
-        runway  = airport.getRunway(this.fms.currentWaypoint().runway);
-
-        offset = runway.getOffset(this.position, this.fms.currentWaypoint().runway, true);
-
+        runway  = airport.getRunway(this.rwy_arr);
+        offset = getOffset(this, runway.position, runway.angle);
         offset_angle = vradial(offset);
-        
         this.offset_angle = offset_angle;
-
         this.approachOffset = abs(offset[0]);
         this.approachDistance = offset[1];
-
-        angle = runway.getAngle(this.fms.currentWaypoint().runway);
+        angle = runway.angle;
         if (angle > (2*Math.PI)) angle -= 2*Math.PI;
 
-        var landing_zone_offset = crange(1, runway.length, 5, 0.1, 0.5);
-
-        glideslope_altitude = clamp(0, runway.getGlideslopeAltitude(offset[1] + landing_zone_offset, this.fms.currentWaypoint().runway), this.altitude);
-        glideslope_window   = abs(runway.getGlideslopeAltitude(offset[1] + landing_zone_offset, this.fms.currentWaypoint().runway, radians(1)));
+        glideslope_altitude = clamp(0, runway.getGlideslopeAltitude(offset[1]), this.altitude);
+        glideslope_window   = abs(runway.getGlideslopeAltitude(offset[1], radians(1)));
 
         if(this.mode == "landing")
           this.target.altitude = glideslope_altitude;
 
-        var ils = runway.getILSDistance(this.fms.currentWaypoint().runway);
-        if(!runway.getILS(this.fms.currentWaypoint().runway) || !ils) ils = 40;
+        var ils = runway.ils.loc_maxDist;
+        if(!runway.ils.enabled || !ils) ils = 40;
 
         // lock  ILS if at the right angle and altitude
         if ((abs(this.altitude - glideslope_altitude) < glideslope_window)
             && (abs(offset_angle) < radians(10))
             && (offset[1] < ils)) {
-          //plane is on the glide slope
-          if(this.mode != "landing") {
+          if(abs(offset[0]) < 0.05 && this.mode != "landing") {
             this.mode = "landing";
-            if (!this.projected &&
-                (abs(angle_offset(this.fms.currentWaypoint().heading, angle)) > radians(30)))
-            {
-              ui_log(true,
-                     this.getRadioCallsign() +
-                       " landing intercept vector was greater than 30 degrees");
+            if (!this.projected && (abs(angle_offset(this.fms.currentWaypoint().heading,
+                  radians(parseInt(this.rwy_arr.substr(0,2))*10))) > radians(30))) {
+              ui_log(true, this.getRadioCallsign() +
+                      " approach course intercept angle was greater than 30 degrees");
               prop.game.score.violation += 1;
             }
             this.updateStrip();
-            this.fms.setCurrent({
-              turn: null,
-              heading: angle,
-            });
             this.target.turn = null;
           }
 
-          // Steer to within 3m of the centerline while at least 200m out
-          if(offset[1] > 0.2 && abs(offset[1]) > 0.003) {
-            this.target.heading = clamp(radians(-30),
-                                        -12 * offset_angle,
-                                        radians(30)) + angle;
-          } else {
-            this.target.heading = angle;
+          // Intercept localizer and glideslope and follow them inbound
+          var angle_diff = angle_offset(angle, this.heading);
+          var turning_time = Math.abs(degrees(angle_diff)) / 3;  // time to turn angle_diff degrees at 3 deg/s
+          var turning_radius = km(this.speed) / 3600 * turning_time;  // dist covered in the turn, km
+          var dist_to_localizer = offset[0]/Math.sin(angle_diff);  // dist from the localizer intercept point, km
+          if(dist_to_localizer <= turning_radius || dist_to_localizer < 0.5) {
+            // Steer to within 3m of the centerline while at least 200m out
+            if(offset[1] > 0.2 && abs(offset[0]) > 0.003 )
+              this.target.heading = clamp(radians(-30), -12 * offset_angle, radians(30)) + angle;
+            else this.target.heading = angle;
+
+            // Follow the glideslope
+            this.target.altitude = glideslope_altitude;
           }
 
-          var s = this.target.speed;
-
-          this.target.altitude     = glideslope_altitude;
+          // Speed control on final approach
           if(this.fms.currentWaypoint().speed > 0)
             this.fms.setCurrent({start_speed: this.fms.currentWaypoint().speed});
           this.target.speed        = crange(3, offset[1], 10, this.model.speed.landing, this.fms.currentWaypoint().start_speed);
-        } else if(this.altitude >= 300 && this.mode == "landing") {
+        } else if((this.altitude - runway_elevation) >= 300 && this.mode == "landing") {
           this.updateStrip();
           this.cancelLanding();
           if (!this.projected)
@@ -1744,7 +2470,7 @@ var Aircraft=Fiber.extend(function() {
             speech_say([ {type:"callsign", content:this}, {type:"text", content:" going around"} ])
             prop.game.score.abort.landing += 1;
           }
-        } else {
+        } else if(this.altitude >= 300) {
           this.target.heading = this.fms.currentWaypoint().heading;
           this.target.turn = this.fms.currentWaypoint().turn;
         }
@@ -1752,31 +2478,54 @@ var Aircraft=Fiber.extend(function() {
         //this has to be outside of the glide slope if, as the plane is no
         //longer on the glide slope once it is on the runway (as the runway is
         //behind the ILS marker)
-        if(this.altitude < 10) {
+        if(this.isLanded()) {
           this.target.speed = 0;
         }
       } else if(this.fms.currentWaypoint().navmode == "fix") {
-        var fix = this.fms.currentWaypoint().location,
-            vector_to_fix = vsub(this.position, fix),
-            distance_to_fix = distance2d(this.position, fix);
-        if((distance_to_fix < 0.5) ||
+        var fix = this.fms.currentWaypoint().location;
+        if(!fix) {
+          console.error(this.getCallsign()+" using 'fix' navmode, but no fix location!");
+          console.log(this.fms);
+          console.log(this.fms.currentWaypoint());
+        }
+        var vector_to_fix = vsub(this.position, fix);
+        var distance_to_fix = distance2d(this.position, fix);
+        if((distance_to_fix < 1) ||
           ((distance_to_fix < 10) && (distance_to_fix < aircraft_turn_initiation_distance(this, fix)))) {
-//          ui_log(this.getRadioCallsign() + " passed over " + this.fms.currentWaypoint().name.toUpperCase() + ", will maintain heading " + heading_to_string(this.fms.currentWaypoint().heading) + " at " + this.fms.currentWaypoint().altitude + " feet");
-          if(this.fms.waypoints.length > 1)
-            this.fms.nextWaypoint();
-          else
+          if(!this.fms.atLastWaypoint()) { // if there are more waypoints available
+            this.fms.nextWaypoint();  // move to the next waypoint
+          }
+          else {
             this.cancelFix();
+          }
           this.updateStrip();
         } else {
           this.target.heading = vradial(vector_to_fix) - Math.PI;
           this.target.turn = null;
         }
       } else if(this.fms.currentWaypoint().navmode == "hold") {
-        if(this.fms.currentWaypoint().turn == "right") {
-          this.target.heading = this.heading + Math.PI/4;
-        } else if(this.fms.currentWaypoint().turn == "left") {
-          this.target.heading = this.heading - Math.PI/4;
+
+        var hold = this.fms.currentWaypoint().hold;
+        var angle_off_of_leg_hdg = abs(angle_offset(this.heading, this.target.heading));
+        if(angle_off_of_leg_hdg < 0.035) { // within ~2° of upwd/dnwd
+          var offset = getOffset(this, hold.fixPos);
+          if(hold.timer == null && offset[1] < 0 && offset[2] < 2) {  // entering hold, just passed the fix
+            hold.timer = -999; // Force aircraft to enter the hold immediately
+          }
+          // Holding Logic
+          if(hold.timer && hold.legLength.includes("min")) {  // time-based hold legs
+            if(hold.timer == -1) hold.timer = prop.game.time; // save the time
+            else if(prop.game.time >= hold.timer + parseInt(hold.legLength.replace("min",""))*60) { // time to turn
+              this.target.heading += Math.PI;   // turn to other leg
+              this.target.turn = hold.dirTurns;
+              hold.timer = -1; // reset the timer
+            }
+          else if(hold.legLength.includes("nm")) {  // distance-based hold legs
+            // not yet implemented
+          }
         }
+      }
+
       } else {
         this.target.heading = this.fms.currentWaypoint().heading;
         this.target.turn = this.fms.currentWaypoint().turn;
@@ -1790,58 +2539,63 @@ var Aircraft=Fiber.extend(function() {
 
         this.target.speed = this.fms.currentWaypoint().speed;
         this.target.speed = clamp(this.model.speed.min, this.target.speed, this.model.speed.max);
-
       }
 
+      // If stalling, make like a meteorite and fall to the earth!
       if(this.speed < this.model.speed.min) this.target.altitude = 0;
 
       //finally, taxi overrides everything
       var was_taxi = false;
       if(this.mode == "taxi") {
         var elapsed = game_time() - this.taxi_start;
-        if(elapsed > this.taxi_delay) {
+        if(elapsed > this.taxi_time) {
           this.mode = "waiting";
           was_taxi = true;
           this.updateStrip();
         }
       }
-      if(this.mode == "waiting") {
-        var runway = airport_get().getRunway(this.fms.currentWaypoint().runway);
-        var position = runway.getPosition(this.fms.currentWaypoint().runway);
+      else if(this.mode == "waiting") {
+        var runway = airport_get().getRunway(this.rwy_dep);
+        var position = runway.position;
 
         this.position[0] = position[0];
         this.position[1] = position[1];
-        this.heading     = runway.getAngle(this.fms.currentWaypoint().runway);
-
+        this.heading     = runway.angle;
+        this.altitude    = runway.elevation;
         if (!this.projected &&
-            (runway.isWaiting(this, this.fms.currentWaypoint().runway) == 0) &&
+            (runway.inQueue(this) == 0) &&
             (was_taxi == true))
         {
-          ui_log(this.getCallsign(), " holding short of runway "+this.fms.currentWaypoint().runway);
-          speech_say([ {type:"callsign", content:this}, {type:"text", content:"holding short of runway "+radio_runway(this.fms.currentWaypoint().runway)} ]);
+          ui_log(this.getCallsign(), " holding short of runway "+this.rwy_dep);
+          speech_say([ {type:"callsign", content:this}, {type:"text", content:"holding short of runway "+radio_runway(this.rwy_dep)} ]);
           this.updateStrip();
         }
       }
+      else if(this.mode == "takeoff") {
+        var runway = airport_get().getRunway(this.rwy_dep);
+        // Altitude Control
+        if(this.speed < this.model.speed.min) this.target.altitude = runway.elevation;
+        else this.target.altitude = this.fms.currentWaypoint().altitude;
 
-      if(this.mode == "takeoff") {
-        var runway = airport_get().getRunway(this.fms.currentWaypoint().runway);
-
-        this.target.heading = runway.getAngle(this.fms.currentWaypoint().runway);
-
-        if(this.speed < this.model.speed.min) {
-          this.target.altitude = 0;
-          this.altitude = 0;
-        } else {
-          this.target.altitude = this.fms.currentWaypoint().altitude;
-        }
-
-        this.target.speed = this.model.speed.cruise;
-
-        if(this.altitude > 200 && this.target.speed > this.model.speed.min) {
+        // Heading Control
+        var rwyHdg = airport_get().getRunway(this.rwy_dep).angle;
+        if((this.altitude - runway.elevation)<400) this.target.heading = rwyHdg;
+        else {
+          if(!this.fms.followCheck().sid && this.fms.currentWaypoint().heading == null) { // if no directional instructions available after takeoff
+            this.fms.setCurrent({heading:rwyHdg});  // fly runway heading
+          }
           this.mode = "cruise";
-          this.fms.setCurrent({runway: null});
           this.updateStrip();
         }
+
+        // Speed Control
+        this.target.speed = this.model.speed.cruise;  // go fast!
+      }
+
+      // Limit speed to 250 knots while under 10,000 feet MSL (it's the law!)
+      if(this.altitude < 10000) {
+        if(this.isPrecisionGuided()) this.target.speed = Math.min(this.target.speed, 250);  // btwn 0 and 250
+        else this.target.speed = Math.min(this.fms.currentWaypoint().speed, 250); // btwn scheduled speed and 250
       }
     },
     updatePhysics: function() {
@@ -1854,7 +2608,7 @@ var Aircraft=Fiber.extend(function() {
 
         // TURNING
 
-        if(this.altitude > 10 && this.heading != this.target.heading) {
+        if(!this.isLanded() && this.heading != this.target.heading) {
           // Perform standard turns 3 deg/s or 25 deg bank, whichever
           // requires less bank angle.
           // Formula based on http://aviation.stackexchange.com/a/8013
@@ -1944,7 +2698,7 @@ var Aircraft=Fiber.extend(function() {
             crab_angle = Math.asin((wind.speed * Math.sin(offset)) /
                                    this.speed);
           }
-          vector = vsum(vscale(vturn(wind.angle + Math.PI),
+          vector = vadd(vscale(vturn(wind.angle + Math.PI),
                                wind.speed * 0.000514444 * game_delta()),
                         vscale(vturn(angle + crab_angle),
                                scaleSpeed));
@@ -1952,24 +2706,27 @@ var Aircraft=Fiber.extend(function() {
         this.ds = vlen(vector);
         this.groundSpeed = this.ds / 0.000514444 / game_delta();
         this.groundTrack = vradial(vector);
-        this.position = vsum(this.position, vector);
+        this.position = vadd(this.position, vector);
       }
       else {
         this.ds = scaleSpeed;
         this.groundSpeed = this.speed;
         this.groundTrack = this.heading;
-        this.position = vsum(this.position, vscale([sin(angle), cos(angle)], scaleSpeed));
+        this.position = vadd(this.position, vscale([sin(angle), cos(angle)], scaleSpeed));
       }
-
       this.distance = vlen(this.position);
       this.radial = vradial(this.position);
       if (this.radial < 0) this.radial += Math.PI*2;
 
-      var inside = (this.distance <= airport_get().ctr_radius &&
-                    this.altitude <= airport_get().ctr_ceiling);
-      if (inside != this.inside_ctr)
-        this.crossBoundary(inside);
-
+      if(airport_get().perimeter) { // polygonal airspace boundary
+        var inside = point_in_area(this.position, airport_get().perimeter);
+        if (inside != this.inside_ctr) this.crossBoundary(inside);
+      }
+      else {  // simple circular airspace boundary
+        var inside = (this.distance <= airport_get().ctr_radius &&
+                      this.altitude <= airport_get().ctr_ceiling);
+        if (inside != this.inside_ctr) this.crossBoundary(inside);
+      }
     },
     updateWarning: function() {
       // Ignore other aircraft while taxiing
@@ -2031,8 +2788,8 @@ var Aircraft=Fiber.extend(function() {
         $.each(this.restricted.list, function(k, v) {
           warning = warning || v.inside;
         })
-      } 
-      
+      }
+
       if (this.terrain_ranges && !this.isLanded()) {
         var terrain = prop.airport.current.terrain,
             prev_level = this.terrain_ranges[this.terrain_level],
@@ -2046,7 +2803,7 @@ var Aircraft=Fiber.extend(function() {
           }
           this.terrain_level = ele;
         }
-        
+
         for (var id in curr_ranges) {
           curr_ranges[id] -= this.ds;
           //console.log(curr_ranges[id]);
@@ -2077,79 +2834,122 @@ var Aircraft=Fiber.extend(function() {
       if (this.projected) return;
       var heading  = this.html.find(".heading");
       var altitude = this.html.find(".altitude");
+      var destination = this.html.find(".destination");
       var speed    = this.html.find(".speed");
+      var wp = this.fms.currentWaypoint();
 
-      heading.removeClass("runway hold waiting taxi");
-      altitude.removeClass("runway hold");
-      speed.removeClass("runway");
+      // Update fms.following
+      this.fms.followCheck();
 
-      if(this.fms.currentWaypoint().runway) {
+      // Remove all old styling
+      heading.removeClass("runway hold waiting taxi lookingGood allSet");
+      altitude.removeClass("runway hold waiting taxi lookingGood allSet");
+      destination.removeClass("runway hold waiting taxi lookingGood allSet");
+      speed.removeClass("runway hold waiting taxi lookingGood allSet");
+
+      // Populate strip fields with default values
+      heading.text(heading_to_string(wp.heading));
+      (wp.altitude) ? altitude.text(wp.altitude) : altitude.text("-");
+      destination.text(this.destination || airport_get().icao);
+      speed.text(wp.speed);
+
+      // When at the apron...
+      if(this.mode == "apron") {
         heading.addClass("runway");
-        heading.text(this.fms.currentWaypoint().runway);
+        heading.text("apron");
+        if(wp.altitude) altitude.addClass("runway");
+        if(this.fms.following.sid) {
+          destination.text(this.fms.following.sid + '.'
+            + this.fms.currentLeg().route.split('.')[2]);
+          destination.addClass("runway");
+        }
+        speed.addClass("runway");
+      }
 
-        speed.text(this.fms.currentWaypoint().speed);
+      // When taxiing...
+      else if(this.mode == "taxi") {
+        heading.addClass("runway");
+        heading.text("taxi");
+        if(wp.altitude) altitude.addClass("runway");
+        if(this.fms.following.sid) {
+          destination.text(this.fms.following.sid + '.'
+            + this.fms.currentLeg().route.split('.')[2]);
+          destination.addClass("runway");
+        }
+        speed.addClass("runway");
+        if(this.taxi_next) altitude.text("ready");
+      }
 
-        if(this.category == "arrival") {
-          if(this.mode == "landing") {
-            altitude.text("ILS locked");
-            altitude.addClass("runway");
+      // When waiting in the takeoff queue
+      else if(this.mode == "waiting") {
+        heading.addClass("runway");
+        heading.text("ready");
+        if(wp.altitude) altitude.addClass("runway");
+        if(this.fms.following.sid) {
+          destination.text(this.fms.following.sid + '.'
+            + this.fms.currentLeg().route.split('.')[2]);
+          destination.addClass("runway");
+        }
+        speed.addClass("runway");
+      }
 
-            speed.text("-");
-            speed.addClass("runway");
-          } else {
-            altitude.text("no ILS");
-            altitude.addClass("hold");
+      // When taking off...
+      else if(this.mode == "takeoff") {
+        heading.text("takeoff");
+        if(this.fms.following.sid) {
+          destination.text(this.fms.following.sid + '.'
+            + this.fms.currentLeg().route.split('.')[2]);
+          destination.addClass("lookingGood");
+        }
+      }
+
+      // When in normal flight...
+      else if(this.mode == "cruise") {
+        if(wp.navmode == "fix") {
+          heading.text((wp.fix[0]=='_') ? "[RNAV]" : wp.fix);
+          if(this.fms.following.sid) {
+            heading.addClass("allSet");
+            altitude.addClass("allSet");
+            destination.addClass("allSet");
+            speed.addClass("allSet");
           }
-        } else {
-          if(this.mode == "apron") {
-            heading.text("apron");
-
-            altitude.text("ready");
-            altitude.addClass("runway");
-
-            speed.text("-");
-            speed.addClass("runway");
-          } else if(this.mode == "taxi") {
-            altitude.text("taxi");
-            altitude.addClass("runway");
-
-            if(this.taxi_next) {
-              altitude.text("waiting");
-            }
-
-            speed.text("-");
-            speed.addClass("runway");
-          } else if(this.mode == "waiting") {
-            altitude.text("waiting");
-            altitude.addClass("runway");
-
-            speed.text("-");
-            speed.addClass("runway");
-          } else if(this.mode == "takeoff") {
-            altitude.text(this.fms.currentWaypoint().altitude);
-
-            speed.text(this.fms.currentWaypoint().speed);
+          if(this.fms.following.star) {
+            heading.addClass("followingSTAR");
+            if(this.fms.currentWaypoint().fixRestrictions.altitude)
+              altitude.addClass("followingSTAR");
+            destination.text(this.fms.following.star + '.' + airport_get().icao);
+            destination.addClass("followingSTAR");
+            if(this.fms.currentWaypoint().fixRestrictions.speed)
+              speed.addClass("followingSTAR");
           }
         }
-      } else {
-        heading.text(heading_to_string(this.fms.currentWaypoint().heading));
-        altitude.text(this.fms.currentWaypoint().altitude);
-        speed.text(this.fms.currentWaypoint().speed);
+        else if(wp.navmode == "hold") {
+          heading.text("holding");
+          heading.addClass("hold");
+        }
+        else if(wp.navmode == "rwy") {  // attempting ILS intercept
+          heading.addClass("lookingGood");
+          heading.text("intercept");
+          altitude.addClass("lookingGood");
+          destination.addClass("lookingGood");
+          destination.text(this.fms.fp.route[this.fms.fp.route.length-1] + " " + wp.runway);
+          speed.addClass("lookingGood");
+        }
       }
 
-      if(this.fms.currentWaypoint().navmode == "fix") {
-        heading.text(this.fms.currentWaypoint().name);
-        heading.addClass("hold");
-      } else if(this.fms.currentWaypoint().navmode == "hold") {
-        heading.text("hold "+this.fms.currentWaypoint().turn);
-        heading.addClass("hold");
+      // When established on the ILS...
+      else if(this.mode == "landing") {
+        heading.addClass("allSet");
+        heading.text("on ILS");
+        altitude.addClass("allSet");
+        altitude.text("GS");
+        destination.addClass("allSet");
+        destination.text(this.fms.fp.route[this.fms.fp.route.length-1] + " " + wp.runway);
+        speed.addClass("allSet");
       }
     },
-
     updateAuto: function() {
-
     },
-
     update: function() {
       if(prop.aircraft.auto.enabled) {
         this.updateAuto();
@@ -2157,11 +2957,9 @@ var Aircraft=Fiber.extend(function() {
       this.updateTarget();
       this.updatePhysics();
     },
-
     addConflict: function(conflict, other) {
       this.conflicts[other.getCallsign()] = conflict;
     },
-
     checkConflict: function(other) {
       if (this.conflicts[other.getCallsign()]) {
         this.conflicts[other.getCallsign()].update();
@@ -2169,7 +2967,6 @@ var Aircraft=Fiber.extend(function() {
       }
       return false;
     },
-
     hasAlerts: function() {
       var a = [false, false];
       var c = null;
@@ -2180,7 +2977,6 @@ var Aircraft=Fiber.extend(function() {
       }
       return a;
     },
-
     removeConflict: function(other) {
       delete this.conflicts[other.getCallsign()];
     },
@@ -2197,7 +2993,6 @@ function aircraft_init_pre() {
   prop.aircraft.auto = {
     enabled: false,
   };
-
 }
 
 function aircraft_auto_toggle() {
@@ -2205,113 +3000,6 @@ function aircraft_auto_toggle() {
 }
 
 function aircraft_init() {
-	
-  // 1990' AIRCRAFTS
-
-  
-  //ATR
-  aircraft_load("at43");
-  aircraft_load("at72");
-
-  // CESSNA
-  aircraft_load("c172");
-  aircraft_load("c182");
-  aircraft_load("c208");
-  aircraft_load("c337");
-  aircraft_load("c510");
-  aircraft_load("c550");
-  aircraft_load("c750");
-
-  // ANTONOV
-  aircraft_load("a124");
-  aircraft_load("an12");
-  aircraft_load("an24");
-  aircraft_load("an72");
-
-  // AIRBUS
-  aircraft_load("a306");
-  aircraft_load("a318");
-  aircraft_load("a319");
-  aircraft_load("a320");
-  aircraft_load("a321");
-  aircraft_load("a332");
-  aircraft_load("a333");
-
-  aircraft_load("a343");
-  aircraft_load("a346");
-
-  aircraft_load("a388");
-
-  // BOEING
-   aircraft_load("b722");   // 1990' Update
-   aircraft_load("b732");   // 1990' Update
-   
-  aircraft_load("b733");
-  aircraft_load("b734");
-  aircraft_load("b735");
-  aircraft_load("b736");
-  aircraft_load("b737");
-  aircraft_load("b738");
-  aircraft_load("b739");
-
-  aircraft_load("b742");   // 1990' Update
-  aircraft_load("b74s");   // 1990' Update
-  aircraft_load("b744");
-  aircraft_load("b748");
-
-
-  aircraft_load("b752");
-  aircraft_load("b753");
-
-  aircraft_load("b762");
-  aircraft_load("b763");
-  aircraft_load("b764");
-
-  aircraft_load("b772");
-  aircraft_load("b77e");
-  aircraft_load("b773");
-  aircraft_load("b77w");
-  aircraft_load("b788");
-
-  // EMBRAER
-  aircraft_load("e110");
-  aircraft_load("e120");
-  aircraft_load("e170");
-  aircraft_load("e50p");
-  aircraft_load("e55p");
-  aircraft_load("e135");
-  aircraft_load("e545");
-  aircraft_load("e190");
-
-  // CONCORDE...
-  aircraft_load("conc");
-
-  // DOUGLAS
-  aircraft_load("md11");
-  aircraft_load("dc10");
-  aircraft_load("dc87");   // 1990' Update
-  aircraft_load("md80");  // 1990' Update
-  aircraft_load("dc93");   // 1990' Update
-
- // FOKKER
-	aircraft_load("f100");
-
-
-  // MISC
-   aircraft_load("l101");  // 1990' Update
-  aircraft_load("be36");
-  aircraft_load("c130");
-  aircraft_load("c5");
-  aircraft_load("il76");
-  aircraft_load("il96");
-  aircraft_load("l410");
-  aircraft_load("p28a");
-  aircraft_load("t154");
-  aircraft_load("t204");
-  aircraft_load("rj85");
-  aircraft_load("c130");
-  aircraft_load("c5");
-  aircraft_load("dh8d");
 }
 
 function aircraft_generate_callsign(airline_name) {
@@ -2324,47 +3012,20 @@ function aircraft_generate_callsign(airline_name) {
 }
 
 function aircraft_callsign_new(airline) {
+  var callsign = null;
   var hit = false;
   while(true) {
-    var callsign = aircraft_generate_callsign(airline);
-    hit=false;
-    for(var i=0;i<prop.aircraft.callsigns.length;i++) {
-      if(prop.aircraft.callsigns[i] == callsign) {
-        callsign = aircraft_callsign_new(airline);
-        hit=true;
-        break;
-      }
-    }
-    if(!hit) break;
+    callsign = aircraft_generate_callsign(airline);
+    if (prop.aircraft.callsigns.indexOf(callsign) == -1)
+      break;
   }
   prop.aircraft.callsigns.push(callsign);
   return callsign;
 }
 
 function aircraft_new(options) {
-  if(!options.callsign) options.callsign = aircraft_callsign_new(options.airline);
-
-  if(!options.icao) {
-    options.icao = airline_get(options.airline).chooseAircraft(options.fleet);
-  }
-  var icao = options.icao.toLowerCase();
-
-  options.model = prop.aircraft.models[icao];
-
-  var aircraft = new Aircraft(options);
-
-  aircraft.complete();
-
-  prop.aircraft.list.push(aircraft);
-
-  console.log("Spawning " + options.category + " : " + aircraft.getCallsign());
-}
-
-function aircraft_load(icao) {
-  icao = icao.toLowerCase();
-  var model = new Model({icao: icao, url: "assets/aircraft/"+icao+".json"});
-  aircraft_add(model);
-  return model;
+  var airline = airline_get(options.airline);
+  return airline.generateAircraft(options);
 }
 
 function aircraft_get_nearest(position) {
@@ -2411,13 +3072,13 @@ function aircraft_update() {
         continue InnerLoop;
       }
 
-      // Fast 2D bounding box check, there are no conflicts over 10km apart
+      // Fast 2D bounding box check, there are no conflicts over 8nm apart (14.816km)
       // no violation can occur in this case.
       // Variation of:
       // http://gamedev.stackexchange.com/questions/586/what-is-the-fastest-way-to-work-out-2d-bounding-box-intersection
       var dx = Math.abs(that.position[0] - other.position[0]);
       var dy = Math.abs(that.position[1] - other.position[1]);
-      if ((dx > 10) || (dy > 10)) {
+      if ((dx > 14.816) || (dy > 14.816)) {
         continue InnerLoop;
       }
       else {
@@ -2434,17 +3095,15 @@ function aircraft_update() {
       ui_log(aircraft.getCallsign() + " switching to ground, good day");
       speech_say([ {type:"callsign", content:aircraft}, {type:"text", content:", switching to ground, good day"} ]);
       prop.game.score.arrival += 1;
-      console.log("arriving aircraft no longer moving");
       remove = true;
     }
     if(aircraft.hit && aircraft.isLanded()) {
       ui_log("Lost radar contact with "+aircraft.getCallsign());
       speech_say([ {type:"callsign", content:aircraft}, {type:"text", content:", radar contact lost"} ]);
-      console.log("aircraft hit and on the ground");
       remove = true;
     }
     // Clean up the screen from aircraft that are too far
-    if(!aircraft_visible(aircraft,2) && !aircraft.inside_ctr){
+    if((!aircraft_visible(aircraft,2) && !aircraft.inside_ctr) && aircraft.fms.currentWaypoint().navmode == 'heading'){
       if(aircraft.category == "arrival") {
         remove = true;
       }
@@ -2453,8 +3112,7 @@ function aircraft_update() {
       }
     }
     if(remove) {
-      aircraft.cleanup();
-      prop.aircraft.list.splice(i, 1);
+      aircraft_remove(aircraft);
       i-=1;
     }
   }
@@ -2465,12 +3123,13 @@ function aircraft_update() {
 // - http://www.ohio.edu/people/uijtdeha/ee6900_fms_00_overview.pdf, Fly-by waypoint
 // - The Avionics Handbook, ch 15
 function aircraft_turn_initiation_distance(a, fix) {
-  if(a.fms.waypoints.length < 2) // if there are no subsequent fixes, fly over 'fix'
-    return 0;
-  var speed = a.speed * 0.514444; // convert knots to m/s
+  var index = a.fms.indexOfCurrentWaypoint().wp;
+  if(index >= a.fms.waypoints().length-1) return 0; // if there are no subsequent fixes, fly over 'fix'
+  var speed = a.speed * (463/900); // convert knots to m/s
   var bank_angle = radians(25); // assume nominal bank angle of 25 degrees for all aircraft
   var g = 9.81;                 // acceleration due to gravity, m/s*s
-  var nextfix = a.fms.waypoints[1].location;
+  var nextfix = a.fms.waypoint(a.fms.indexOfCurrentWaypoint().wp+1).location;
+  if(!nextfix) return 0;
   var nominal_new_course = vradial(vsub(nextfix, fix));
   if( nominal_new_course < 0 ) nominal_new_course += Math.PI * 2;
   var current_heading = a.heading;
@@ -2478,9 +3137,44 @@ function aircraft_turn_initiation_distance(a, fix) {
   var course_change = Math.abs(degrees(current_heading) - degrees(nominal_new_course));
   if (course_change > 180) course_change = 360 - course_change;
   course_change = radians(course_change);
-  //
   var turn_radius = speed*speed / (g * Math.tan(bank_angle));  // meters
   var l2 = speed; // meters, bank establishment in 1s
   var turn_initiation_distance = turn_radius * Math.tan(course_change/2) + l2;
   return turn_initiation_distance / 1000; // convert m to km
+}
+
+// Get aircraft by entity id
+function aircraft_get(eid) {
+  if(eid == null) return null;
+  if(prop.aircraft.list.length > eid && eid >= 0) // prevent out-of-range error
+    return prop.aircraft.list[eid];
+  return null;
+}
+
+// Get aircraft by callsign
+function aircraft_get_by_callsign(callsign) {
+  callsign = String(callsign);
+  for(var i=0; i<prop.aircraft.list.length; i++)
+    if(prop.aircraft.list[i].callsign == callsign.toLowerCase())
+      return prop.aircraft.list[i];
+  return null;
+}
+
+// Get aircraft's eid by callsign
+function aircraft_get_eid_by_callsign(callsign) {
+  for(var i=0; i<prop.aircraft.list.length; i++)
+    if(prop.aircraft.list[i].callsign == callsign.toLowerCase())
+      return prop.aircraft.list[i].eid;
+  return null;
+}
+
+function aircraft_model_get(icao) {
+  if (!(icao in prop.aircraft.models)) {
+    var model = new Model({
+      icao: icao,
+      url: "assets/aircraft/"+icao+".json",
+    });
+    prop.aircraft.models[icao] = model;
+  }
+  return prop.aircraft.models[icao];
 }

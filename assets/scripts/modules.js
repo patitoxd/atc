@@ -1,11 +1,30 @@
 var zlsa = {atc: {}};
 
+var Mediator = Fiber.extend(function (base) {
+  return {
+    init: function (options) {
+    },
+
+    trigger: function(event, data) {
+      if (event == 'startLoading') {
+        zlsa.atc.LoadUI.startLoad(data);
+      }
+      else if (event == 'stopLoading') {
+        zlsa.atc.LoadUI.stopLoad();
+      }
+    },
+  };
+});
+
+zlsa.atc.mediator = new Mediator();
+
 //////////////////////////////////////////////////////////////////////////////////////////
 
 // all modules, prefix with "-" to signify library; <name>_init etc. won't be called
 var MODULES=[
   "-util",
   "-animation",
+  "-parser",
 
   "speech",
 
@@ -73,6 +92,31 @@ var RELEASE=false;
 // module_resize()
 
 //////////////////////////////////////////////////////////////////////////////////////////
+
+/********* Various fixes for browser issues *********/
+  /** Necessary for Internet Explorer 11 (IE11) to not die while using String.fromCodePoint()
+   ** This function is not natively available in IE11, as noted on this MSDN page:
+   ** https://msdn.microsoft.com/en-us/library/dn890630(v=vs.94).aspx
+   ** Apparently, it is fine with pre-Win8.1 MS Edge 11, but never okay in IE.
+   ** Here, the function is added to the String prototype to make later code usable.
+   ** Solution from: http://xahlee.info/js/js_unicode_code_point.html
+   */
+  if (!String.fromCodePoint) {
+    // ES6 Unicode Shims 0.1 , © 2012 Steven Levithan , MIT License
+    String.fromCodePoint = function fromCodePoint () {
+      var chars = [], point, offset, units, i;
+      for (i = 0; i < arguments.length; ++i) {
+        point = arguments[i];
+        offset = point - 0x10000;
+        units = point > 0xFFFF ? [0xD800 + (offset >> 10), 0xDC00 + (offset & 0x3FF)] : [point];
+        chars.push(String.fromCharCode.apply(null, units));
+      }
+      return chars.join("");
+    }
+  }
+
+
+/******************* Module Setup *******************/
 
 var async_modules={};
 var async_done_callback=null;
@@ -241,12 +285,11 @@ function done() {
   $(window).resize(resize);
   resize();
   call_module("*","done");
-  async_wait(function() {
-    prop.loaded=true;
-    call_module("*","ready");
-    if(UPDATE)
-      requestAnimationFrame(update);
-  });
+
+  prop.loaded=true;
+  call_module("*","ready");
+  if(UPDATE)
+    requestAnimationFrame(update);
 }
 
 function resize() {
@@ -256,19 +299,20 @@ function resize() {
 function update() {
   if(!prop.complete) {
     call_module("*","complete");
+    zlsa.atc.LoadUI.complete();
     prop.complete=true;
   }
-//  call_module("*","update_pre");
-//  call_module("*","update");
-//  call_module("*","update_post");
+
+  if(UPDATE)
+    requestAnimationFrame(update);
+  else
+    return;
 
   game_update_pre();
   aircraft_update();
 
   canvas_update_post();
 
-  if(UPDATE)
-    requestAnimationFrame(update);
   prop.time.frames+=1;
   prop.time.frame.count+=1;
   var elapsed=time()-prop.time.frame.start;
@@ -279,6 +323,15 @@ function update() {
   }
   prop.time.frame.delta=Math.min(time()-prop.time.frame.last,1/20);
   prop.time.frame.last=time();
+}
+
+/**
+ * Change whether updates should run
+ */
+function update_run(arg) {
+  if ((!UPDATE) && arg)
+    requestAnimationFrame(update);
+  UPDATE=arg;
 }
 
 function delta() {

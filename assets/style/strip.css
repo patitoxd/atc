@@ -3,6 +3,9 @@
   background-color: rgba(255, 255, 255, 0.0);
 
   border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 2px solid transparent; 
+  border-bottom: 2px solid transparent; 
 
   list-style-type: none;
   position: relative;
@@ -30,14 +33,18 @@
 
 .strip.arrival {
   border-color: rgba(224, 128, 128, 0.8);
+  border-top-color: rgba(224, 128, 128, 0.1);
+  border-bottom-color: rgba(224, 128, 128, 0.1);
 }
 
 .strip.departure {
   border-color: rgba(128, 255, 255, 0.8);
+  border-top-color: rgba(128, 255, 255, 0.05);
+  border-bottom-color: rgba(128, 255, 255, 0.05);
 }
 
 .strip .aircraft {
-  display: block;
+  display: table;
   font-style: italic;
 }
 
@@ -56,17 +63,21 @@
   font-style: italic;
 }
 
+.strip .followingSTAR {
+  color: rgba(224, 128, 128, 0.8);
+}
+
+.strip .lookingGood {
+  color: #88c790;
+}
+
+.strip .allSet {
+  color: #5d987b;
+}
+
 .strip .hold {
   color: #f76;
   font-style: italic;
-}
-
-.strip .taxi {
-/*  color: #f8e;*/
-}
-
-.strip .waiting {
-/*  color: #7f6;*/
 }
 
 .strip .altitude {
@@ -78,7 +89,7 @@
 
 .strip .destination {
   text-align: center;
-  color: #8cf;
+  /*color: #8cf;*/
 
   position: absolute;
   padding-right: 5px;

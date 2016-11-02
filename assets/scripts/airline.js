@@ -13,7 +13,7 @@ zlsa.atc.Airline = Fiber.extend(function() {
      */
     init: function (icao, options) {
       /** ICAO airline designation */
-      this.icao = "YYY";
+      this.icao = icao;
 
       /** Agency name */
       this.name = "Default airline";
@@ -34,25 +34,30 @@ zlsa.atc.Airline = Fiber.extend(function() {
         default: [],
       };
 
-      this.parse(icao, options);
+      this.loading = true;
+      this.loaded = false;
+      this.priorityLoad = false;
+      this._pendingAircraft = [];
+      this.parse(options);
+      if (options.url) this.load(options.url);
     },
 
     /**
      * Initialize object from data
      */
-    parse: function (icao, data) {
-      if (data.icao)
-        this.icao = data.icao;
-      else
-        this.icao = icao;
+    parse: function (data) {
+      if (data.icao) this.icao = data.icao;
 
-      this.name = data.name;
-      this.callsign = data.callsign.name;
-      this.flightNumberGeneration.length = data.callsign.length;
-      this.flightNumberGeneration.alpha = (data.callsign.alpha === true);
+      if (data.name) this.name = data.name;
+      if (data.callsign) {
+        this.callsign = data.callsign.name;
+        if (data.callsign.length)
+          this.flightNumberGeneration.length = data.callsign.length;
+        this.flightNumberGeneration.alpha = (data.callsign.alpha === true);
+      }
       if (data.fleets)
         this.fleets = data.fleets;
-      else
+      else if (data.aircraft)
         this.fleets.default = data.aircraft;
 
       for (var f in this.fleets) {
@@ -60,6 +65,30 @@ zlsa.atc.Airline = Fiber.extend(function() {
           this.fleets[f][j][0] = this.fleets[f][j][0].toLowerCase();
         }
       }
+    },
+
+    /**
+     * Load the data for this airline
+     */
+    load: function(url) {
+      this._url = url;
+      if (this.loaded)
+        return;
+      zlsa.atc.loadAsset({url: url,
+                          immediate: this.priorityLoad})
+        .done(function (data) {
+          this.parse(data);
+          this.loading = false;
+          this.loaded = true;
+          this.validateFleets();
+          this._generatePendingAircraft();
+        }.bind(this))
+        .fail(function (jqXHR, textStatus, errorThrown) {
+          this.loading = false;
+          this._pendingAircraft = [];
+          console.error("Unable to load airline/" + this.icao
+                        + ": " + textStatus);
+        }.bind(this));
     },
 
     /**
@@ -79,6 +108,29 @@ zlsa.atc.Airline = Fiber.extend(function() {
                     + " for airline " + this.icao);
         throw e;
       }
+    },
+
+    /**
+     * Create an aircraft
+     */
+    generateAircraft: function(options) {
+      if (!this.loaded) {
+        if (this.loading) {
+          this._pendingAircraft.push(options);
+          if (!this.priorityLoad) {
+            zlsa.atc.loadAsset({url: this._url,
+                                immediate: true});
+            this.priorityLoad = true;
+          }
+          return true;
+        }
+        else {
+          console.warn("Unable to spawn aircraft for airline/" + this.icao
+                       + " as loading failed");
+          return false;
+        }
+      }
+      return this._generateAircraft(options);
     },
 
     /**
@@ -112,11 +164,8 @@ zlsa.atc.Airline = Fiber.extend(function() {
     validateFleets: function () {
       for (var f in this.fleets) {
         for (var j=0;j<this.fleets[f].length;j++) {
-          if (!(this.fleets[f][j][0] in prop.aircraft.models)) {
-            console.warn("Airline " + this.icao.toUpperCase()
-                         + " uses nonexistent aircraft " + this.fleets[f][j][0]
-                         + ", expect errors");
-          }
+          // Preload the aircraft model
+          aircraft_model_get(this.fleets[f][j][0]);
 
           if (typeof this.fleets[f][j][1] != "number") {
             console.warn("Airline " + this.icao.toUpperCase()
@@ -126,115 +175,36 @@ zlsa.atc.Airline = Fiber.extend(function() {
         }
       }
     },
+
+    _generateAircraft: function(options) {
+      if(!options.callsign) options.callsign = aircraft_callsign_new(options.airline);
+
+      if(!options.icao) {
+        options.icao = this.chooseAircraft(options.fleet);
+      }
+      var model = aircraft_model_get(options.icao.toLowerCase());
+      return model.generateAircraft(options);
+      var icao = options.icao.toLowerCase();
+    },
+
+    /**
+     * Generate aircraft which were queued while the model loaded
+     */
+    _generatePendingAircraft: function() {
+      $.each(this._pendingAircraft, function (idx, options) {
+        this._generateAircraft(options);
+      }.bind(this));
+      this._pendingAircraft = null;
+    },
   };
 });
 
-function airline_init() {
-  // 1990' Airlines
-	  airline_load("PAA");
-	  airline_load("TWA");
-	  
-  // Civil Airlines
-  airline_load("UAL");
-  airline_load("BAW");
-  airline_load("AAL");
-  airline_load("AWE");
-  airline_load("CESSNA");
-  airline_load("ACA");
-  airline_load("BCY");
-  airline_load("KLM");
-  airline_load("KLC");
-  airline_load("DAL");
-  airline_load("AIRTAXI");
-  airline_load("LIGHTGA");
-  airline_load("FASTGA");
-  airline_load("SAS");
-  airline_load("NAX");
-  airline_load("EIN");
-  airline_load("RYR");
-  airline_load("BER");
-  airline_load("EZY");
-  airline_load("GWI");
-  airline_load("AUA");
-
-  // South American
-  airline_load("ONE");
-  airline_load("GLO");
-  airline_load("TAM");
-  airline_load("AVA");
-  airline_load("AZU");
-  airline_load("EMBRAER");
-  airline_load("ARG");
-
-  // Asian
-  airline_load("AFL");
-  airline_load("MOV");
-  airline_load("RLU");
-  airline_load("SBI");
-  airline_load("SVR");
-  airline_load("TYA");
-  airline_load("ASA");
-  airline_load("SWA");
-  
-  // Asian
-  airline_load("CES");
-  airline_load("CPA");
-  airline_load("CSN");
-  airline_load("HDA");
-
-  // Cargo Airlines
-  airline_load("FDX");
-  airline_load("UPS");
-  airline_load("CWC");
-
-  // Military Air Forces
-  airline_load("RFF");
-  airline_load("FAB");
-  airline_load("USAF");
-
-  // Internationals to South America
-  airline_load("SA-AEA");
-  airline_load("SA-AFR");
-  airline_load("SA-AMX");
-  airline_load("SA-AVA");
-  airline_load("SA-AZA");
-  airline_load("SA-BAW");
-  airline_load("SA-CCA");
-  airline_load("SA-DLH");
-  airline_load("SA-IBE");
-  airline_load("SA-KAL");
-  airline_load("SA-KLM");
-  airline_load("SA-LAN");
-  airline_load("SA-UAE");
-  airline_load("SA-UAL");
-
-  airline_load("DLH");
-  airline_load("VIR");
-  airline_load("THY");
-
-}
-
-function airline_load(icao) {
-  icao = icao.toLowerCase();
-  new Content({
-    type: "json",
-    url: "assets/airlines/"+icao+".json",
-    payload: icao.toLowerCase(),
-    callback: function(status, data, payload) {
-      if(status == "ok") {
-        prop.airline.airlines[payload] = new zlsa.atc.Airline(payload, data);
-      }
-    }
-  });
-}
-
 function airline_get(icao) {
   icao = icao.toLowerCase();
-  return prop.airline.airlines[icao];
-}
-
-function airline_ready() {
-  for(var i in prop.airline.airlines) {
-    prop.airline.airlines[i].validateFleets();
+  if (!(icao in prop.airline.airlines)) {
+    var airline = new zlsa.atc.Airline(icao,
+                                       {url: "assets/airlines/"+icao+".json",});
+    prop.airline.airlines[icao] = airline;
   }
+  return prop.airline.airlines[icao];
 }

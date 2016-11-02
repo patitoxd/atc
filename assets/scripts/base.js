@@ -13,6 +13,7 @@ var Position=Fiber.extend(function() {
   return {
     // coordinates - Array containing offset pair or latitude/longitude pair
     // reference - Position to use for calculating offsets when lat/long given
+    // mode - optional. Set to "GPS" to indicate you are inputting lat/lon that should be converted to positions
     //
     // coordinates may contain an optional elevation as a third
     // element.  It must be suffixed by either 'ft' or 'm' to indicate
@@ -21,7 +22,7 @@ var Position=Fiber.extend(function() {
     //   Decimal degrees - 'N47.112388112'
     //   Decimal minutes - 'N38d38.109808'
     //   Decimal seconds - 'N58d27m12.138'
-    init: function(coordinates, reference, magnetic_north) {
+    init: function(coordinates, reference, magnetic_north, /*optional*/ mode) {
       if(!coordinates) coordinates=[];
 
       this.latitude = 0;
@@ -34,19 +35,22 @@ var Position=Fiber.extend(function() {
       this.x = 0;
       this.y = 0;
       this.position = [this.x, this.y];
+      this.gps = [0,0];
 
-      this.parse(coordinates);
+      this.parse(coordinates, mode);
     },
-    parse: function(coordinates) {
+    parse: function(coordinates, mode) {
       if (! /^[NESW]/.test(coordinates[0])) {
         this.x = coordinates[0];
         this.y = coordinates[1];
         this.position = [this.x, this.y];
+        if(mode === 'GPS') this.parse4326();
         return;
       }
 
       this.latitude = this.parseCoordinate(coordinates[0]);
       this.longitude = this.parseCoordinate(coordinates[1]);
+      this.gps = [this.longitude, this.latitude]; // GPS coordinates in [x,y] order
 
       if (coordinates[2] != null) {
         this.elevation = parseElevation(coordinates[2]);
@@ -129,5 +133,35 @@ var Position=Fiber.extend(function() {
       }
       return ret;
     },
+  };
+});
+
+/** An enclosed region defined by a series of Position objects and an altitude range
+ ** @param {array} poly - series of Position objects that outline the shape
+ **                Note: DO NOT repeat the origin to 'close' the shape. Unnecessary.
+ ** @param {number} floor - (optional) altitude of bottom of area, in hundreds of feet
+ ** @param {number} ceiling - (optional) altitude of top of area, in hundreds of feet
+ ** @param {string} airspace_class - (optional) FAA airspace classification (A,B,C,D,E,G)
+ */
+var Area = Fiber.extend(function() {
+  return {
+    init: function(positions, /*optional*/ floor, ceiling, airspace_class) {
+      if(!positions) return;
+      this.poly     = [];
+      this.floor    = null;
+      this.ceiling  = null;
+      this.airspace_class = null;
+
+      if(floor != null) this.floor = floor;
+      if(ceiling != null) this.ceiling = ceiling;
+      if(airspace_class) this.airspace_class = airspace_class;
+
+      this.parse(positions);
+    },
+    parse: function(positions) {
+      for(var i=0; i<positions.length; i++) this.poly.push(positions[i]);
+      if(this.poly[0] == this.poly[this.poly.length-1])
+        this.poly.pop();  // shape shouldn't fully close; will draw with 'cc.closepath()'
+    }
   };
 });
